@@ -1,0 +1,28 @@
+[package]
+name = "columnar-tsdb"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Embedded columnar time-series storage engine: Gorilla compression, chunked immutable storage, WAL, background compaction"
+license = "MIT"
+readme = "README.md"
+keywords = ["timeseries", "database", "compression", "gorilla", "storage"]
+categories = ["database-implementations", "compression"]
+
+[lib]
+name = "columnar_tsdb"
+path = "src/lib.rs"
+
+[dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "codecs"
+harness = false

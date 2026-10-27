@@ -1,0 +1,6 @@
+/target
+Cargo.lock.bak
+*.tmp
+/data
+.idea/
+.vscode/
