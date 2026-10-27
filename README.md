@@ -1,5 +1,9 @@
 # columnar-tsdb
 
+[![ci](https://github.com/monaaoua9/columnar-tsdb/actions/workflows/ci.yml/badge.svg)](https://github.com/monaaoua9/columnar-tsdb/actions/workflows/ci.yml)
+![license](https://img.shields.io/badge/license-MIT-blue)
+![rust](https://img.shields.io/badge/rust-1.89%2B-orange)
+
 An embedded, zero-dependency time-series storage engine in Rust. Gorilla-style
 compression, immutable columnar chunks, a write-ahead log, a time-bucket index
 that answers aggregates from chunk metadata, and a background thread that seals
@@ -153,4 +157,4 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-MSRV 1.89 (uses `File::try_lock`). MIT licensed.
+MSRV 1.89 (uses `File::try_lock`). MIT licensed, (c) 2026 Amenah Saleh.

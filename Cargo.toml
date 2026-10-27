@@ -6,6 +6,7 @@ rust-version = "1.89"
 description = "Embedded columnar time-series storage engine: Gorilla compression, chunked immutable storage, WAL, background compaction"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/monaaoua9/columnar-tsdb"
 keywords = ["timeseries", "database", "compression", "gorilla", "storage"]
 categories = ["database-implementations", "compression"]
 
