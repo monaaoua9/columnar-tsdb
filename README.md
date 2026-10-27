@@ -10,7 +10,7 @@ that answers aggregates from chunk metadata, and a background thread that seals
 and compacts chunks while reads and writes keep going.
 
 ```rust
-use columnar_tsdb::{Config, Engine, SeriesKey};
+use columnar_tsdb::{Config, Engine, Selector, SeriesKey};
 
 let engine = Engine::open(Config::new("./data"))?;
 let cpu = SeriesKey::new("cpu_usage").label("host", "web-1");
@@ -18,6 +18,10 @@ let cpu = SeriesKey::new("cpu_usage").label("host", "web-1");
 engine.append(&cpu, 1_700_000_000_000, 41.5)?;
 let pts = engine.query_range(&cpu, 1_700_000_000_000, 1_700_003_600_000)?; // [start, end)
 let agg = engine.aggregate(&cpu, i64::MIN, i64::MAX)?;                      // count/sum/min/max/avg
+
+// across series: cpu_usage{dc="fra", host!="web-9"}, grouped by host
+let sel = Selector::new("cpu_usage").eq("dc", "fra").ne("host", "web-9");
+let per_host = engine.aggregate_by(&sel, "host", i64::MIN, i64::MAX)?;
 ```
 
 ## Data flow
@@ -58,6 +62,7 @@ src/
     gorilla.rs        xor float codec
   chunk.rs            ActiveChunk, SealedChunk, file framing, recovery scan
   series.rs           per-series state: active / frozen / sealed + snapshots
+  index.rs            inverted label index (name / label=value -> sorted series ids)
   wal.rs, catalog.rs  write-ahead log, series catalog (both crc'd, torn-tail safe)
   engine.rs           public API, background worker, flush, compaction, retention
 tests/engine.rs       end-to-end: crash recovery, compaction, concurrency
@@ -95,6 +100,23 @@ not repeated per point.
 `count/sum/min/max` and are never read from disk. Only chunks straddling the
 range edges are decoded. `query_range` decodes the timestamp column first, binary
 searches the slice, then decodes values only up to the end of the slice.
+
+## Label queries
+
+`Selector::new(name).eq(k, v).ne(k, v)` picks series. The engine keeps an inverted
+index: metric name -> sorted series ids, and `(label, value)` -> sorted series ids.
+`eq` intersects posting lists, `ne` subtracts them (a series without the label
+passes `ne`), so resolving a selector never scans the catalog.
+
+- `select` returns the matching keys.
+- `query_select` returns raw points per series.
+- `aggregate_select` merges per-series aggregates; each series still uses the
+  stats-only path for chunks fully inside the range.
+- `aggregate_by(sel, "dc", ..)` is a GROUP BY label (series lacking the label are
+  grouped under `""`).
+
+The index is memory-only and rebuilt from the series catalog on open. Matchers are
+exact string comparisons; there is no regex matcher.
 
 ## Concurrency model
 

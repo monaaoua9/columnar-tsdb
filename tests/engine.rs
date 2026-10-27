@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use columnar_tsdb::{Config, Engine, Error, Point, SeriesKey};
+use columnar_tsdb::{Config, Engine, Error, Point, Selector, SeriesKey};
 
 fn tmp(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("ctsdb-it-{tag}-{}", std::process::id()));
@@ -483,6 +483,91 @@ fn block_cache_stays_under_budget() {
     let first = e.query_range(&k, i64::MIN, i64::MAX).unwrap();
     assert!(e.stats().cache_bytes <= 2_000);
     assert_eq!(e.query_range(&k, i64::MIN, i64::MAX).unwrap(), first);
+    drop(e);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn label_selectors_and_cross_series_queries() {
+    let dir = tmp("labels");
+    let c = cfg(&dir);
+    let e = Engine::open(c.clone()).unwrap();
+
+    let mut keys = Vec::new();
+    for h in 0..4 {
+        let dc = if h % 2 == 0 { "fra" } else { "ams" };
+        let k = SeriesKey::new("cpu")
+            .label("host", format!("h{h}"))
+            .label("dc", dc);
+        for i in 0..300i64 {
+            e.append(&k, i * 10, (h * 100) as f64 + (i % 9) as f64)
+                .unwrap();
+        }
+        keys.push(k);
+    }
+    let other = SeriesKey::new("mem").label("host", "h0");
+    e.append(&other, 5, 999.0).unwrap();
+    // late writes + a sealed/unsealed mix
+    e.flush().unwrap();
+    e.append(&keys[0], 15, 1_000.0).unwrap();
+    e.append(&keys[1], 2_995, 2_000.0).unwrap();
+
+    let sels = [
+        Selector::new("cpu"),
+        Selector::new("cpu").eq("dc", "fra"),
+        Selector::new("cpu").eq("dc", "ams").ne("host", "h1"),
+        Selector::new("cpu").ne("dc", "fra"),
+        Selector::new("mem"),
+        Selector::new("nothing"),
+    ];
+    for sel in &sels {
+        let matched = e.select(sel);
+        let want: Vec<_> = keys
+            .iter()
+            .chain([&other])
+            .filter(|k| sel.matches(k))
+            .collect();
+        assert_eq!(matched.len(), want.len(), "{sel:?}");
+        assert!(want.iter().all(|k| matched.contains(k)));
+
+        for (lo, hi) in [(i64::MIN, i64::MAX), (100, 1_234)] {
+            let series = e.query_select(sel, lo, hi).unwrap();
+            let all: Vec<f64> = series
+                .iter()
+                .flat_map(|(_, p)| p.iter().map(|p| p.value))
+                .collect();
+            match e.aggregate_select(sel, lo, hi).unwrap() {
+                None => assert!(all.is_empty()),
+                Some(a) => {
+                    assert_eq!(a.count as usize, all.len());
+                    assert!((a.sum - all.iter().sum::<f64>()).abs() < 1e-6);
+                    assert_eq!(a.max, all.iter().cloned().fold(f64::MIN, f64::max));
+                    assert_eq!(a.min, all.iter().cloned().fold(f64::MAX, f64::min));
+                }
+            }
+        }
+    }
+
+    let by_dc = e
+        .aggregate_by(&Selector::new("cpu"), "dc", i64::MIN, i64::MAX)
+        .unwrap();
+    assert_eq!(by_dc.keys().collect::<Vec<_>>(), ["ams", "fra"]);
+    let total = e
+        .aggregate_select(&Selector::new("cpu"), i64::MIN, i64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_dc.values().map(|a| a.count).sum::<u64>(), total.count);
+    let missing = e
+        .aggregate_by(&Selector::new("cpu"), "no_such_label", i64::MIN, i64::MAX)
+        .unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[""].count, total.count);
+
+    // the index is rebuilt from the catalog on open
+    drop(e);
+    let e = Engine::open(c).unwrap();
+    assert_eq!(e.select(&Selector::new("cpu").eq("dc", "fra")).len(), 2);
+    assert_eq!(e.select(&Selector::new("mem")).len(), 1);
     drop(e);
     std::fs::remove_dir_all(dir).unwrap();
 }

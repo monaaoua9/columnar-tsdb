@@ -61,6 +61,49 @@ impl SeriesKey {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Matcher {
+    // label must be present with exactly this value
+    Eq(String, String),
+    // label absent, or present with a different value
+    Ne(String, String),
+}
+
+// metric name plus label conditions, all of which must hold
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Selector {
+    pub name: String,
+    pub matchers: Vec<Matcher>,
+}
+
+impl Selector {
+    pub fn new(name: impl Into<String>) -> Self {
+        Selector {
+            name: name.into(),
+            matchers: Vec::new(),
+        }
+    }
+
+    pub fn eq(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
+        self.matchers.push(Matcher::Eq(k.into(), v.into()));
+        self
+    }
+
+    pub fn ne(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
+        self.matchers.push(Matcher::Ne(k.into(), v.into()));
+        self
+    }
+
+    // slow reference check; the engine resolves selectors through the label index instead
+    pub fn matches(&self, key: &SeriesKey) -> bool {
+        key.name() == self.name
+            && self.matchers.iter().all(|m| match m {
+                Matcher::Eq(k, v) => key.labels().get(k) == Some(v),
+                Matcher::Ne(k, v) => key.labels().get(k) != Some(v),
+            })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aggregate {
     pub count: u64,

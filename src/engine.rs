@@ -11,7 +11,8 @@ use crate::catalog;
 use crate::chunk::{self, BlockCache, SealedChunk};
 use crate::config::{Config, SyncMode};
 use crate::error::{Error, Result};
-use crate::model::{Aggregate, Point, SeriesId, SeriesKey};
+use crate::index::LabelIndex;
+use crate::model::{Aggregate, Point, Selector, SeriesId, SeriesKey};
 use crate::series::{bucket_of, merge_override, Series};
 use crate::wal::Wal;
 
@@ -37,6 +38,9 @@ struct Inner {
     cfg: Config,
     chunk_dir: PathBuf,
     catalog: RwLock<HashMap<SeriesId, Arc<Series>>>,
+    // written only while the catalog write lock is held, so an id found here is always in the
+    // catalog too
+    index: RwLock<LabelIndex>,
     cat_file: Mutex<File>,
     wal: Mutex<Wal>,
     next_id: AtomicU64,
@@ -105,47 +109,80 @@ impl Engine {
 
     // points with start <= ts < end, ascending
     pub fn query_range(&self, key: &SeriesKey, start: i64, end: i64) -> Result<Vec<Point>> {
-        let Some(s) = self.inner.find(key) else {
-            return Ok(Vec::new());
-        };
-        let snap = s
-            .state
-            .read()
-            .unwrap()
-            .snapshot(start, end, self.inner.cfg.bucket_width, true);
-
-        // decoding happens with no lock held; chunks are immutable
-        let mut out = Vec::new();
-        for c in &snap.sealed {
-            out.extend(c.read_range(start, end)?);
+        match self.inner.find(key) {
+            Some(s) => self.inner.points(&s, start, end),
+            None => Ok(Vec::new()),
         }
-        out.extend(snap.mem);
-        Ok(merge_override(out, &snap.ooo))
     }
 
     // chunks fully inside [start, end) are answered from their stored stats
     pub fn aggregate(&self, key: &SeriesKey, start: i64, end: i64) -> Result<Option<Aggregate>> {
-        let Some(s) = self.inner.find(key) else {
-            return Ok(None);
-        };
-        let snap = s
-            .state
-            .read()
-            .unwrap()
-            .snapshot(start, end, self.inner.cfg.bucket_width, false);
-
-        // only edge chunks (or ones with late points in them) end up here
-        let mut pts = Vec::new();
-        for c in &snap.sealed {
-            pts.extend(c.read_range(start, end)?);
+        match self.inner.find(key) {
+            Some(s) => Ok(self.inner.agg(&s, start, end)?.filter(|a| a.count > 0)),
+            None => Ok(None),
         }
-        pts.extend(snap.mem);
+    }
 
-        let mut agg = snap.covered;
-        for p in merge_override(pts, &snap.ooo) {
-            agg.add(p.value);
+    // keys of all series the selector matches, ordered by series id
+    pub fn select(&self, sel: &Selector) -> Vec<SeriesKey> {
+        self.inner
+            .resolve(sel)
+            .into_iter()
+            .map(|s| s.key.clone())
+            .collect()
+    }
+
+    // raw points of every matching series; series with nothing in range are left out
+    pub fn query_select(
+        &self,
+        sel: &Selector,
+        start: i64,
+        end: i64,
+    ) -> Result<Vec<(SeriesKey, Vec<Point>)>> {
+        let mut out = Vec::new();
+        for s in self.inner.resolve(sel) {
+            let pts = self.inner.points(&s, start, end)?;
+            if !pts.is_empty() {
+                out.push((s.key.clone(), pts));
+            }
         }
-        Ok((agg.count > 0).then_some(agg))
+        Ok(out)
+    }
+
+    // one aggregate over all matching series (each still answered from chunk stats)
+    pub fn aggregate_select(
+        &self,
+        sel: &Selector,
+        start: i64,
+        end: i64,
+    ) -> Result<Option<Aggregate>> {
+        let mut total = Aggregate::EMPTY;
+        for s in self.inner.resolve(sel) {
+            if let Some(a) = self.inner.agg(&s, start, end)? {
+                total.merge(&a);
+            }
+        }
+        Ok((total.count > 0).then_some(total))
+    }
+
+    // like GROUP BY label: one aggregate per value of `label`. series without the label are
+    // grouped under the empty string
+    pub fn aggregate_by(
+        &self,
+        sel: &Selector,
+        label: &str,
+        start: i64,
+        end: i64,
+    ) -> Result<BTreeMap<String, Aggregate>> {
+        let mut groups: BTreeMap<String, Aggregate> = BTreeMap::new();
+        for s in self.inner.resolve(sel) {
+            let Some(a) = self.inner.agg(&s, start, end)? else {
+                continue;
+            };
+            let v = s.key.labels().get(label).cloned().unwrap_or_default();
+            groups.entry(v).or_insert(Aggregate::EMPTY).merge(&a);
+        }
+        Ok(groups)
     }
 
     // seals everything in memory and, if nothing raced in, truncates the wal
@@ -211,8 +248,10 @@ impl Inner {
 
         let (cat_file, keys) = catalog::open(&cfg.dir.join("series.cat"))?;
         let mut map: HashMap<SeriesId, Arc<Series>> = HashMap::new();
+        let mut index = LabelIndex::default();
         for k in keys {
             let s = Series::new(k);
+            index.insert(&s.key, s.id);
             map.insert(s.id, Arc::new(s));
         }
 
@@ -233,6 +272,7 @@ impl Inner {
             cfg,
             chunk_dir,
             catalog: RwLock::new(map),
+            index: RwLock::new(index),
             cat_file: Mutex::new(cat_file),
             wal: Mutex::new(wal),
             next_id: AtomicU64::new(max_id + 1),
@@ -264,6 +304,49 @@ impl Inner {
         Ok(inner)
     }
 
+    fn resolve(&self, sel: &Selector) -> Vec<Arc<Series>> {
+        let ids = self.index.read().unwrap().resolve(sel);
+        let map = self.catalog.read().unwrap();
+        ids.iter().filter_map(|id| map.get(id).cloned()).collect()
+    }
+
+    fn points(&self, s: &Series, start: i64, end: i64) -> Result<Vec<Point>> {
+        let snap = s
+            .state
+            .read()
+            .unwrap()
+            .snapshot(start, end, self.cfg.bucket_width, true);
+
+        // decoding happens with no lock held; chunks are immutable
+        let mut out = Vec::new();
+        for c in &snap.sealed {
+            out.extend(c.read_range(start, end)?);
+        }
+        out.extend(snap.mem);
+        Ok(merge_override(out, &snap.ooo))
+    }
+
+    fn agg(&self, s: &Series, start: i64, end: i64) -> Result<Option<Aggregate>> {
+        let snap = s
+            .state
+            .read()
+            .unwrap()
+            .snapshot(start, end, self.cfg.bucket_width, false);
+
+        // only edge chunks (or ones with late points in them) end up here
+        let mut pts = Vec::new();
+        for c in &snap.sealed {
+            pts.extend(c.read_range(start, end)?);
+        }
+        pts.extend(snap.mem);
+
+        let mut agg = snap.covered;
+        for p in merge_override(pts, &snap.ooo) {
+            agg.add(p.value);
+        }
+        Ok((agg.count > 0).then_some(agg))
+    }
+
     fn find_id(&self, id: SeriesId) -> Option<Arc<Series>> {
         self.catalog.read().unwrap().get(&id).cloned()
     }
@@ -293,6 +376,7 @@ impl Inner {
         catalog::append(&mut self.cat_file.lock().unwrap(), key, self.cfg.sync)?;
         let s = Arc::new(Series::new(key.clone()));
         map.insert(id, s.clone());
+        self.index.write().unwrap().insert(key, id);
         Ok(s)
     }
 
