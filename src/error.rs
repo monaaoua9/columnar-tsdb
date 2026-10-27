@@ -5,7 +5,8 @@ use std::io;
 pub enum Error {
     Io(io::Error),
     Corrupt(String),
-    OutOfOrder { last: i64, got: i64 },
+    // late point older than the retention window; it would be expired right away
+    TooOld { cutoff: i64, got: i64 },
     BadValue(f64),
     BadConfig(&'static str),
     Locked,
@@ -24,8 +25,8 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "io error: {e}"),
             Error::Corrupt(m) => write!(f, "corrupt data: {m}"),
-            Error::OutOfOrder { last, got } => {
-                write!(f, "out-of-order point: ts {got} <= last ts {last}")
+            Error::TooOld { cutoff, got } => {
+                write!(f, "point ts {got} is older than retention cutoff {cutoff}")
             }
             Error::BadValue(v) => write!(f, "non-finite value rejected: {v}"),
             Error::BadConfig(m) => write!(f, "bad config: {m}"),

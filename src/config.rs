@@ -19,6 +19,8 @@ pub struct Config {
     pub max_points_per_chunk: usize,
     // appends block while a series has more frozen chunks than this (fail if the sealer errors)
     pub max_frozen_chunks: usize,
+    // late points buffered per series before the maintenance thread is woken to merge them
+    pub max_ooo_points: usize,
     // decoded-from-disk column blocks kept in memory; 0 disables the cache
     pub block_cache_bytes: usize,
     pub sync: SyncMode,
@@ -36,6 +38,7 @@ impl Config {
             bucket_width: 2 * 3600 * 1000,
             max_points_per_chunk: 16_384,
             max_frozen_chunks: 64,
+            max_ooo_points: 8192,
             block_cache_bytes: 64 << 20,
             sync: SyncMode::Never,
             maintenance_interval: Duration::from_millis(500),

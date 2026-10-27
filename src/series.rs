@@ -11,6 +11,31 @@ pub fn bucket_of(ts: i64, width: i64) -> i64 {
     ts.div_euclid(width).saturating_mul(width)
 }
 
+// both inputs ascending by ts; on equal ts the `over` value wins
+pub fn merge_override(base: Vec<Point>, over: &[Point]) -> Vec<Point> {
+    if over.is_empty() {
+        return base;
+    }
+    let mut out = Vec::with_capacity(base.len() + over.len());
+    let (mut i, mut j) = (0, 0);
+    while i < base.len() && j < over.len() {
+        if base[i].ts < over[j].ts {
+            out.push(base[i]);
+            i += 1;
+        } else if base[i].ts > over[j].ts {
+            out.push(over[j]);
+            j += 1;
+        } else {
+            out.push(over[j]);
+            i += 1;
+            j += 1;
+        }
+    }
+    out.extend_from_slice(&base[i..]);
+    out.extend_from_slice(&over[j..]);
+    out
+}
+
 pub struct Series {
     pub id: SeriesId,
     pub key: SeriesKey,
@@ -37,37 +62,54 @@ pub struct State {
     pub frozen: Vec<Arc<ActiveChunk>>,
     // bucket start -> chunks sorted by min_ts. usually 1 per bucket after compaction
     pub sealed: BTreeMap<i64, Vec<Arc<SealedChunk>>>,
+    // highest in-order timestamp seen; anything <= this is a late write
     pub last_ts: Option<i64>,
+    // late writes not yet merged into sealed chunks. a ts here beats the same ts anywhere else
+    pub ooo: BTreeMap<i64, f64>,
 }
 
 pub struct Snapshot {
     pub sealed: Vec<Arc<SealedChunk>>,
     pub mem: Vec<Point>,
+    pub ooo: Vec<Point>,
     // chunks fully inside the range, answered from stats alone (aggregate path only)
     pub covered: Aggregate,
 }
 
 impl State {
-    pub fn validate(&self, pts: &[Point]) -> Result<()> {
-        let mut prev = self.last_ts;
+    // Validates the whole batch and says which points are late (true). Nothing is applied,
+    // so a bad batch leaves no prefix behind.
+    pub fn plan(&self, pts: &[Point], retention: Option<i64>) -> Result<Vec<bool>> {
+        let mut last = self.last_ts;
+        let mut late = Vec::with_capacity(pts.len());
         for p in pts {
             if !p.value.is_finite() {
                 return Err(Error::BadValue(p.value));
             }
-            if let Some(last) = prev {
-                if p.ts <= last {
-                    return Err(Error::OutOfOrder { last, got: p.ts });
+            let is_late = last.is_some_and(|l| p.ts <= l);
+            if is_late {
+                if let (Some(l), Some(r)) = (last, retention) {
+                    let cutoff = l.saturating_sub(r);
+                    if p.ts < cutoff {
+                        return Err(Error::TooOld { cutoff, got: p.ts });
+                    }
                 }
+            } else {
+                last = Some(p.ts);
             }
-            prev = Some(p.ts);
+            late.push(is_late);
         }
-        Ok(())
+        Ok(late)
     }
 
-    // true if a chunk got frozen, i.e. the sealer has work
-    pub fn apply(&mut self, pts: &[Point], cfg: &Config, ids: &AtomicU64) -> bool {
+    // true if the maintenance thread should look at this series soon
+    pub fn apply(&mut self, pts: &[Point], late: &[bool], cfg: &Config, ids: &AtomicU64) -> bool {
         let mut froze = false;
-        for &p in pts {
+        for (&p, &is_late) in pts.iter().zip(late) {
+            if is_late {
+                self.ooo.insert(p.ts, p.value);
+                continue;
+            }
             let b = bucket_of(p.ts, cfg.bucket_width);
             let roll = match &self.active {
                 Some(a) => a.bucket != b || a.len() >= cfg.max_points_per_chunk,
@@ -83,7 +125,16 @@ impl State {
             a.push(p);
             self.last_ts = Some(p.ts);
         }
-        froze
+        froze || self.ooo.len() > cfg.max_ooo_points
+    }
+
+    // smallest ts still held in raw memory chunks. late points below it can be merged into
+    // sealed chunks without overlapping anything
+    pub fn mem_min(&self) -> Option<i64> {
+        self.frozen
+            .first()
+            .map(|f| f.stats().min_ts)
+            .or_else(|| self.active.as_ref().map(|a| a.stats().min_ts))
     }
 
     pub fn freeze_active(&mut self) {
@@ -93,7 +144,7 @@ impl State {
     }
 
     pub fn is_drained(&self) -> bool {
-        self.active.is_none() && self.frozen.is_empty()
+        self.active.is_none() && self.frozen.is_empty() && self.ooo.is_empty()
     }
 
     pub fn insert_sealed(&mut self, c: Arc<SealedChunk>) {
@@ -111,15 +162,27 @@ impl State {
         let mut snap = Snapshot {
             sealed: Vec::new(),
             mem: Vec::new(),
+            ooo: Vec::new(),
             covered: Aggregate::EMPTY,
         };
         if start >= end {
             return snap;
         }
+        snap.ooo = self
+            .ooo
+            .range(start..end)
+            .map(|(&t, &v)| Point::new(t, v))
+            .collect();
+        // stored stats can't be trusted for a chunk with a late point inside its span: the
+        // point may add to it or overwrite one of its values
+        let dirty = |lo: i64, hi: i64| self.ooo.range(lo..=hi).next().is_some();
 
         for (_, chunks) in self.sealed.range(bucket_of(start, width)..end) {
             for c in chunks.iter().filter(|c| c.stats.overlaps(start, end)) {
-                if !need_points && c.stats.covered_by(start, end) {
+                if !need_points
+                    && c.stats.covered_by(start, end)
+                    && !dirty(c.stats.min_ts, c.stats.max_ts)
+                {
                     snap.covered.merge(&c.stats.agg);
                 } else {
                     snap.sealed.push(c.clone());
@@ -132,8 +195,9 @@ impl State {
             if c.len() == 0 || !c.stats().overlaps(start, end) {
                 continue;
             }
-            if !need_points && c.stats().covered_by(start, end) {
-                snap.covered.merge(&c.stats().agg);
+            let st = c.stats();
+            if !need_points && st.covered_by(start, end) && !dirty(st.min_ts, st.max_ts) {
+                snap.covered.merge(&st.agg);
             } else {
                 c.collect_range(start, end, &mut snap.mem);
             }

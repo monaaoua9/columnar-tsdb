@@ -8,7 +8,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 
     let mut cfg = Config::new(&dir);
-    cfg.bucket_width = 2 * 3600 * 1000;
+    cfg.bucket_width = 24 * 3600 * 1000;
     let engine = Engine::open(cfg).unwrap();
 
     let n_series = 8;

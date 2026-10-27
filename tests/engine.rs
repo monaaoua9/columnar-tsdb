@@ -105,22 +105,23 @@ fn rejects_bad_input() {
     let k = key();
     e.append(&k, 100, 1.0).unwrap();
     assert!(matches!(
-        e.append(&k, 100, 2.0),
-        Err(Error::OutOfOrder { .. })
-    ));
-    assert!(matches!(
-        e.append(&k, 50, 2.0),
-        Err(Error::OutOfOrder { .. })
-    ));
-    assert!(matches!(
         e.append(&k, 200, f64::NAN),
         Err(Error::BadValue(_))
     ));
+    assert!(matches!(
+        e.append(&k, 200, f64::INFINITY),
+        Err(Error::BadValue(_))
+    ));
 
-    // bad batch must not leave a prefix behind
-    let batch = [Point::new(300, 1.0), Point::new(250, 1.0)];
+    // bad batch must not leave a prefix behind, late points included
+    let batch = [
+        Point::new(300, 1.0),
+        Point::new(50, 1.0),
+        Point::new(60, f64::NAN),
+    ];
     assert!(e.append_batch(&k, &batch).is_err());
     assert_eq!(e.query_range(&k, 0, 1_000).unwrap().len(), 1);
+    assert_eq!(e.stats().ooo_points, 0);
     drop(e);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -160,8 +161,10 @@ fn reopen_after_clean_close() {
     let e = Engine::open(cfg(&dir)).unwrap();
     assert_eq!(e.query_range(&k, i64::MIN, i64::MAX).unwrap().len(), 500);
     assert_eq!(e.stats().wal_bytes, 0);
-    // ordering state survives too
-    assert!(e.append(&k, 4_990, 1.0).is_err());
+    // "newest ts" survives the restart: this is a late overwrite, not a new point
+    e.append(&k, 4_990, 1.0).unwrap();
+    let pts = e.query_range(&k, i64::MIN, i64::MAX).unwrap();
+    assert_eq!((pts.len(), pts[499]), (500, Point::new(4_990, 1.0)));
     e.append(&k, 5_000, 1.0).unwrap();
     drop(e);
     std::fs::remove_dir_all(dir).unwrap();
@@ -221,6 +224,186 @@ fn retention_drops_old_chunks() {
         pts[0].ts
     );
     assert_eq!(pts.last().unwrap().ts, 19_990);
+
+    // a late point that would be expired immediately is refused instead of silently kept
+    assert!(matches!(
+        e.append(&k, 0, 1.0),
+        Err(Error::TooOld { got: 0, .. })
+    ));
+    e.append(&k, 19_000, 7.0).unwrap();
+    drop(e);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn late_points_are_visible_immediately_and_survive_flush() {
+    let dir = tmp("late");
+    let e = Engine::open(cfg(&dir)).unwrap();
+    let k = key();
+    fill(&e, &k, 100); // 0, 10, ..., 990
+
+    // between existing points, before the first one, and a duplicate that must win
+    e.append(&k, 5, 55.0).unwrap();
+    e.append(&k, -40, 44.0).unwrap();
+    e.append(&k, 500, -1.0).unwrap();
+    let check = |e: &Engine| {
+        let pts = e.query_range(&k, i64::MIN, i64::MAX).unwrap();
+        assert_eq!(pts.len(), 102);
+        assert!(pts.windows(2).all(|w| w[0].ts < w[1].ts));
+        assert_eq!(pts[0], Point::new(-40, 44.0));
+        assert!(pts.contains(&Point::new(5, 55.0)));
+        assert!(pts.contains(&Point::new(500, -1.0)));
+        let a = e.aggregate(&k, i64::MIN, i64::MAX).unwrap().unwrap();
+        assert_eq!(a.count, 102);
+        assert_eq!(a.min, -1.0);
+        assert_eq!(a.max, 55.0);
+    };
+    check(&e);
+    assert_eq!(e.stats().ooo_points, 3);
+
+    e.flush().unwrap();
+    check(&e);
+    assert_eq!(e.stats().ooo_points, 0);
+    assert_eq!(e.stats().wal_bytes, 0);
+
+    // overwrite a value that now lives in a sealed chunk
+    e.append(&k, 500, 123.0).unwrap();
+    let a = e.aggregate(&k, 400, 600).unwrap().unwrap();
+    assert_eq!((a.count, a.max), (20, 123.0));
+    e.flush().unwrap();
+    assert_eq!(e.aggregate(&k, 400, 600).unwrap().unwrap().max, 123.0);
+    drop(e);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn late_points_survive_crash_via_wal() {
+    let dir = tmp("late-crash");
+    let k = key();
+    let mut c = cfg(&dir);
+    c.flush_on_close = false;
+    c.maintenance_interval = Duration::from_secs(3600);
+    {
+        let e = Engine::open(c.clone()).unwrap();
+        fill(&e, &k, 300);
+        e.append(&k, 3, 33.0).unwrap();
+        e.append(&k, 3, 34.0).unwrap(); // second late write to the same ts
+        e.append(&k, 1_005, -5.0).unwrap();
+    }
+    let e = Engine::open(c).unwrap();
+    let pts = e.query_range(&k, i64::MIN, i64::MAX).unwrap();
+    assert_eq!(pts.len(), 301 + 1);
+    assert!(pts.contains(&Point::new(3, 34.0)));
+    assert!(!pts.contains(&Point::new(3, 33.0)));
+    assert!(pts.contains(&Point::new(1_005, -5.0)));
+    drop(e);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+// xorshift, same as the unit tests use
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+// Throws random in-order and late writes at the engine, with flushes, compactions and
+// crash-style reopens in between, and checks every answer against a BTreeMap.
+#[test]
+fn random_operations_match_a_model() {
+    use std::collections::BTreeMap;
+
+    let dir = tmp("model");
+    let k = key();
+    let mut c = cfg(&dir);
+    c.bucket_width = 500;
+    c.max_points_per_chunk = 20;
+    c.maintenance_interval = Duration::from_millis(5);
+    c.flush_on_close = false;
+
+    let seed = std::env::var("TSDB_SEED").ok().and_then(|s| s.parse().ok());
+    let mut rng = Rng(seed.unwrap_or(0x5EED));
+    let mut model: BTreeMap<i64, f64> = BTreeMap::new();
+    let mut e = Engine::open(c.clone()).unwrap();
+    let mut head = 0i64;
+
+    for step in 0..400 {
+        match rng.below(10) {
+            0..=4 => {
+                // a batch: mostly moving forward, some late, some duplicates
+                let mut batch = Vec::new();
+                for _ in 0..1 + rng.below(12) {
+                    let ts = if rng.below(3) == 0 {
+                        rng.below((head + 1) as u64) as i64
+                    } else {
+                        head += 1 + rng.below(30) as i64;
+                        head
+                    };
+                    let v = rng.below(10_000) as f64 / 100.0;
+                    batch.push(Point::new(ts, v));
+                }
+                e.append_batch(&k, &batch).unwrap();
+                for p in &batch {
+                    model.insert(p.ts, p.value);
+                }
+            }
+            5 => e.flush().unwrap(),
+            6 => {
+                e.compact().unwrap();
+            }
+            7 if step % 7 == 0 => {
+                // crash: no checkpoint, everything not sealed comes back from the wal
+                drop(e);
+                e = Engine::open(c.clone()).unwrap();
+            }
+            _ => thread::sleep(Duration::from_millis(3)),
+        }
+
+        // random window plus the full range
+        let a = rng.below((head + 2) as u64) as i64;
+        let b = a + rng.below(800) as i64;
+        for (lo, hi) in [(a, b), (i64::MIN, i64::MAX)] {
+            let want: Vec<Point> = model
+                .range(lo..hi)
+                .map(|(&t, &v)| Point::new(t, v))
+                .collect();
+            let got = e.query_range(&k, lo, hi).unwrap();
+            assert_eq!(got, want, "step {step} range {lo}..{hi}");
+
+            match e.aggregate(&k, lo, hi).unwrap() {
+                None => assert!(want.is_empty(), "step {step}"),
+                Some(g) => {
+                    assert_eq!(g.count as usize, want.len(), "step {step}");
+                    let sum: f64 = want.iter().map(|p| p.value).sum();
+                    assert!(
+                        (g.sum - sum).abs() < 1e-6 * sum.abs().max(1.0),
+                        "step {step}"
+                    );
+                    let min = want.iter().map(|p| p.value).fold(f64::INFINITY, f64::min);
+                    let max = want
+                        .iter()
+                        .map(|p| p.value)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    assert_eq!((g.min, g.max), (min, max), "step {step}");
+                }
+            }
+        }
+    }
+
+    // and once more after a clean checkpoint + reopen
+    e.flush().unwrap();
+    assert_eq!(e.stats().ooo_points, 0);
+    drop(e);
+    let e = Engine::open(c).unwrap();
+    let want: Vec<Point> = model.iter().map(|(&t, &v)| Point::new(t, v)).collect();
+    assert_eq!(e.query_range(&k, i64::MIN, i64::MAX).unwrap(), want);
     drop(e);
     std::fs::remove_dir_all(dir).unwrap();
 }

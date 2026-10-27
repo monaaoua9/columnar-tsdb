@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use crate::chunk::{self, BlockCache, SealedChunk};
 use crate::config::{Config, SyncMode};
 use crate::error::{Error, Result};
 use crate::model::{Aggregate, Point, SeriesId, SeriesKey};
-use crate::series::Series;
+use crate::series::{bucket_of, merge_override, Series};
 use crate::wal::Wal;
 
 #[derive(Clone, Debug, Default)]
@@ -22,6 +22,7 @@ pub struct EngineStats {
     pub sealed_points: u64,
     pub compressed_bytes: u64,
     pub frozen_chunks: usize,
+    pub ooo_points: usize,
     pub wal_bytes: u64,
     pub cache_bytes: usize,
     pub last_maintenance_error: Option<String>,
@@ -80,7 +81,10 @@ impl Engine {
         self.append_batch(key, &[Point::new(ts, value)])
     }
 
-    // all-or-nothing: the batch is validated before anything is logged
+    // All-or-nothing: the batch is validated before anything is logged.
+    // Any order is accepted. A point with ts <= the series' newest ts is a late write: it is
+    // buffered, wins over an existing point with the same ts, and is merged into the sealed
+    // chunk of its bucket by the maintenance thread.
     pub fn append_batch(&self, key: &SeriesKey, pts: &[Point]) -> Result<()> {
         if pts.is_empty() {
             return Ok(());
@@ -88,12 +92,12 @@ impl Engine {
         let s = self.inner.series_for(key)?;
         self.inner.throttle(&s)?;
         let mut st = s.state.write().unwrap();
-        st.validate(pts)?;
+        let late = st.plan(pts, self.inner.cfg.retention)?;
         // wal under the series lock so log order == apply order for this series
-        self.inner.wal.lock().unwrap().append(s.id, pts)?;
-        let froze = st.apply(pts, &self.inner.cfg, &self.inner.next_id);
+        self.inner.wal.lock().unwrap().append(s.id, pts, &late)?;
+        let busy = st.apply(pts, &late, &self.inner.cfg, &self.inner.next_id);
         drop(st);
-        if froze {
+        if busy {
             self.inner.kick();
         }
         Ok(())
@@ -116,7 +120,7 @@ impl Engine {
             out.extend(c.read_range(start, end)?);
         }
         out.extend(snap.mem);
-        Ok(out)
+        Ok(merge_override(out, &snap.ooo))
     }
 
     // chunks fully inside [start, end) are answered from their stored stats
@@ -130,13 +134,15 @@ impl Engine {
             .unwrap()
             .snapshot(start, end, self.inner.cfg.bucket_width, false);
 
-        let mut agg = snap.covered;
+        // only edge chunks (or ones with late points in them) end up here
+        let mut pts = Vec::new();
         for c in &snap.sealed {
-            for p in c.read_range(start, end)? {
-                agg.add(p.value);
-            }
+            pts.extend(c.read_range(start, end)?);
         }
-        for p in &snap.mem {
+        pts.extend(snap.mem);
+
+        let mut agg = snap.covered;
+        for p in merge_override(pts, &snap.ooo) {
             agg.add(p.value);
         }
         Ok((agg.count > 0).then_some(agg))
@@ -156,6 +162,7 @@ impl Engine {
         let mut n = 0;
         for s in &series {
             self.inner.seal_pending(s)?;
+            self.inner.merge_ooo(s)?;
             n += self.inner.compact_series(s, true)?;
         }
         Ok(n)
@@ -170,6 +177,7 @@ impl Engine {
         for s in &series {
             let g = s.state.read().unwrap();
             st.frozen_chunks += g.frozen.len();
+            st.ooo_points += g.ooo.len();
             for c in g.sealed.values().flatten() {
                 st.sealed_chunks += 1;
                 st.sealed_points += c.stats.agg.count;
@@ -239,16 +247,19 @@ impl Inner {
             _dir_lock: lock,
         });
 
-        // sealed chunks are a prefix of each series, so anything <= last_ts is already durable
+        // In-order records: sealed chunks hold a prefix of them, so ts <= last_ts is durable
+        // already. Late records can't be judged by ts, so they are always re-applied; that is
+        // idempotent (same ts, same value) and the wal replays in write order, so the last
+        // write per ts still wins.
         for r in recs {
             let Some(s) = inner.find_id(r.series) else {
                 continue;
             };
             let mut st = s.state.write().unwrap();
-            if st.last_ts.is_some_and(|l| r.point.ts <= l) {
+            if !r.late && st.last_ts.is_some_and(|l| r.point.ts <= l) {
                 continue;
             }
-            st.apply(&[r.point], &inner.cfg, &inner.next_id);
+            st.apply(&[r.point], &[r.late], &inner.cfg, &inner.next_id);
         }
         Ok(inner)
     }
@@ -335,6 +346,71 @@ impl Inner {
         Ok(todo.len())
     }
 
+    // Folds buffered late points into the sealed chunks of their buckets (one rewritten chunk
+    // per bucket). Points at or above the oldest raw in-memory chunk wait: merging them now
+    // would make a sealed chunk overlap data that isn't sealed yet.
+    fn merge_ooo(&self, s: &Series) -> Result<usize> {
+        type Group = (Vec<Point>, Vec<Arc<SealedChunk>>);
+        let mut groups: BTreeMap<i64, Group> = BTreeMap::new();
+        {
+            let st = s.state.read().unwrap();
+            let take: Vec<(i64, f64)> = match st.mem_min() {
+                Some(m) => st.ooo.range(..m).map(|(&t, &v)| (t, v)).collect(),
+                None => st.ooo.iter().map(|(&t, &v)| (t, v)).collect(),
+            };
+            for (t, v) in take {
+                let b = bucket_of(t, self.cfg.bucket_width);
+                groups.entry(b).or_default().0.push(Point::new(t, v));
+            }
+            for (b, g) in groups.iter_mut() {
+                g.1 = st.sealed.get(b).cloned().unwrap_or_default();
+            }
+        }
+
+        for (bucket, (late, old)) in &groups {
+            let mut base = Vec::new();
+            for c in old {
+                let (t, v) = c.read_all()?;
+                base.extend(t.iter().zip(&v).map(|(&t, &v)| Point::new(t, v)));
+            }
+            let merged = merge_override(base, late);
+            let ts: Vec<i64> = merged.iter().map(|p| p.ts).collect();
+            let vals: Vec<f64> = merged.iter().map(|p| p.value).collect();
+
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let chunk = SealedChunk::write(
+                &self.chunk_dir,
+                s.id,
+                id,
+                *bucket,
+                &ts,
+                &vals,
+                self.sync_files(),
+            )?;
+
+            let mut st = s.state.write().unwrap();
+            if let Some(v) = st.sealed.get_mut(bucket) {
+                v.retain(|c| !old.iter().any(|g| g.id == c.id));
+            }
+            st.insert_sealed(Arc::new(chunk.with_cache(self.cache.clone())));
+            // a newer write to the same ts may have landed meanwhile; only drop what we flushed
+            for p in late {
+                if st
+                    .ooo
+                    .get(&p.ts)
+                    .is_some_and(|v| v.to_bits() == p.value.to_bits())
+                {
+                    st.ooo.remove(&p.ts);
+                }
+            }
+            drop(st);
+            for g in old {
+                g.mark_obsolete();
+            }
+        }
+        Ok(groups.len())
+    }
+
     // background passes only touch closed buckets (series already moved past them); merging
     // the hot bucket would rewrite it again on every freeze
     fn compact_series(&self, s: &Series, include_open: bool) -> Result<usize> {
@@ -408,6 +484,7 @@ impl Inner {
         for s in &self.series_list() {
             let r = self
                 .seal_pending(s)
+                .and_then(|_| self.merge_ooo(s))
                 .and_then(|_| self.compact_series(s, false));
             if let Err(e) = r {
                 first_err.get_or_insert(e);
@@ -445,6 +522,7 @@ impl Inner {
         }
         for s in &series {
             self.seal_pending(s)?;
+            self.merge_ooo(s)?;
         }
 
         let guards: Vec<_> = series.iter().map(|s| s.state.write().unwrap()).collect();

@@ -7,12 +7,14 @@ use crate::crc::crc32;
 use crate::error::Result;
 use crate::model::{Point, SeriesId};
 
-// series:u64 | ts:i64 | value bits:u64 | crc32 of the first 24 bytes
-const REC: usize = 28;
+// series:u64 | ts:i64 | value bits:u64 | late:u8 | crc32 of the first 25 bytes
+const REC: usize = 29;
 
 pub struct WalRecord {
     pub series: SeriesId,
     pub point: Point,
+    // written out of order (ts <= series last_ts at that moment)
+    pub late: bool,
 }
 
 pub struct Wal {
@@ -37,8 +39,8 @@ impl Wal {
         let mut recs = Vec::with_capacity(raw.len() / REC);
         let mut valid = 0usize;
         for r in raw.chunks(REC).filter(|r| r.len() == REC) {
-            let stored = u32::from_le_bytes(r[24..28].try_into().unwrap());
-            if crc32(&r[..24]) != stored {
+            let stored = u32::from_le_bytes(r[25..29].try_into().unwrap());
+            if crc32(&r[..25]) != stored {
                 break;
             }
             recs.push(WalRecord {
@@ -47,6 +49,7 @@ impl Wal {
                     i64::from_le_bytes(r[8..16].try_into().unwrap()),
                     f64::from_bits(u64::from_le_bytes(r[16..24].try_into().unwrap())),
                 ),
+                late: r[24] != 0,
             });
             valid += REC;
         }
@@ -66,13 +69,15 @@ impl Wal {
         ))
     }
 
-    pub fn append(&mut self, series: SeriesId, pts: &[Point]) -> Result<()> {
+    pub fn append(&mut self, series: SeriesId, pts: &[Point], late: &[bool]) -> Result<()> {
+        debug_assert_eq!(pts.len(), late.len());
         self.buf.clear();
-        for p in pts {
+        for (p, &l) in pts.iter().zip(late) {
             let at = self.buf.len();
             self.buf.extend_from_slice(&series.to_le_bytes());
             self.buf.extend_from_slice(&p.ts.to_le_bytes());
             self.buf.extend_from_slice(&p.value.to_bits().to_le_bytes());
+            self.buf.push(l as u8);
             let crc = crc32(&self.buf[at..]);
             self.buf.extend_from_slice(&crc.to_le_bytes());
         }
@@ -111,9 +116,13 @@ mod tests {
 
         let (mut w, recs) = Wal::open(&p, SyncMode::Never).unwrap();
         assert!(recs.is_empty());
-        w.append(9, &[Point::new(1, 1.5), Point::new(2, -2.5)])
-            .unwrap();
-        w.append(10, &[Point::new(3, 0.0)]).unwrap();
+        w.append(
+            9,
+            &[Point::new(1, 1.5), Point::new(2, -2.5)],
+            &[false, true],
+        )
+        .unwrap();
+        w.append(10, &[Point::new(3, 0.0)], &[false]).unwrap();
         drop(w);
 
         // simulate a crash mid-write
@@ -124,6 +133,7 @@ mod tests {
         let (mut w, recs) = Wal::open(&p, SyncMode::Never).unwrap();
         assert_eq!(recs.len(), 3);
         assert_eq!(recs[1].point, Point::new(2, -2.5));
+        assert!(recs[1].late && !recs[0].late);
         assert_eq!(recs[2].series, 10);
         assert_eq!(w.size(), 3 * REC as u64);
 
