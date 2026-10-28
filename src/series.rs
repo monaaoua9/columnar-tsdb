@@ -143,6 +143,21 @@ impl State {
         }
     }
 
+    // (oldest ts, newest ts) over everything the series holds
+    pub fn bounds(&self) -> Option<(i64, i64)> {
+        let hi = self.last_ts?;
+        let sealed = self
+            .sealed
+            .values()
+            .next()
+            .and_then(|v| v.first())
+            .map(|c| c.stats.min_ts);
+        let mem = self.mem_min();
+        let late = self.ooo.keys().next().copied();
+        let lo = [sealed, mem, late].into_iter().flatten().min()?;
+        Some((lo, hi))
+    }
+
     pub fn is_drained(&self) -> bool {
         self.active.is_none() && self.frozen.is_empty() && self.ooo.is_empty()
     }

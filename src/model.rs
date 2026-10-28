@@ -67,6 +67,37 @@ pub enum Matcher {
     Eq(String, String),
     // label absent, or present with a different value
     Ne(String, String),
+    // label present and its value matches the glob (`*` any run, `?` one char)
+    Like(String, String),
+}
+
+// iterative glob with single-star backtracking; no recursion, no allocation beyond the char vecs
+pub fn glob_match(pat: &str, s: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let t: Vec<char> = s.chars().collect();
+    let (mut i, mut j) = (0, 0);
+    let mut star: Option<usize> = None;
+    let mut mark = 0;
+    while j < t.len() {
+        if i < p.len() && (p[i] == '?' || p[i] == t[j]) {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == '*' {
+            star = Some(i);
+            mark = j;
+            i += 1;
+        } else if let Some(si) = star {
+            i = si + 1;
+            mark += 1;
+            j = mark;
+        } else {
+            return false;
+        }
+    }
+    while i < p.len() && p[i] == '*' {
+        i += 1;
+    }
+    i == p.len()
 }
 
 // metric name plus label conditions, all of which must hold
@@ -94,12 +125,18 @@ impl Selector {
         self
     }
 
+    pub fn like(mut self, k: impl Into<String>, pattern: impl Into<String>) -> Self {
+        self.matchers.push(Matcher::Like(k.into(), pattern.into()));
+        self
+    }
+
     // slow reference check; the engine resolves selectors through the label index instead
     pub fn matches(&self, key: &SeriesKey) -> bool {
         key.name() == self.name
             && self.matchers.iter().all(|m| match m {
                 Matcher::Eq(k, v) => key.labels().get(k) == Some(v),
                 Matcher::Ne(k, v) => key.labels().get(k) != Some(v),
+                Matcher::Like(k, pat) => key.labels().get(k).is_some_and(|v| glob_match(pat, v)),
             })
     }
 }

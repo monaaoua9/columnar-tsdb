@@ -42,7 +42,7 @@ struct Inner {
     // catalog too
     index: RwLock<LabelIndex>,
     cat_file: Mutex<File>,
-    wal: Mutex<Wal>,
+    wal: Vec<Mutex<Wal>>,
     next_id: AtomicU64,
     cache: Arc<BlockCache>,
     // serialises sealing / compaction / checkpoint. only the worker and flush() take it
@@ -98,7 +98,11 @@ impl Engine {
         let mut st = s.state.write().unwrap();
         let late = st.plan(pts, self.inner.cfg.retention)?;
         // wal under the series lock so log order == apply order for this series
-        self.inner.wal.lock().unwrap().append(s.id, pts, &late)?;
+        self.inner
+            .wal_for(s.id)
+            .lock()
+            .unwrap()
+            .append(s.id, pts, &late)?;
         let busy = st.apply(pts, &late, &self.inner.cfg, &self.inner.next_id);
         drop(st);
         if busy {
@@ -185,6 +189,45 @@ impl Engine {
         Ok(groups)
     }
 
+    // Downsampling: one aggregate per `step`-wide window over [start, end), windows aligned to
+    // `start`, empty windows left out. A window that covers whole chunks is answered from their
+    // stats, so a coarse step over a long range stays cheap.
+    pub fn aggregate_windows(
+        &self,
+        key: &SeriesKey,
+        start: i64,
+        end: i64,
+        step: i64,
+    ) -> Result<Vec<(i64, Aggregate)>> {
+        if step <= 0 {
+            return Err(Error::BadConfig("step must be positive"));
+        }
+        match self.inner.find(key) {
+            Some(s) => self.inner.windows(&s, start, end, step),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    // same, merged across every series the selector matches
+    pub fn aggregate_windows_select(
+        &self,
+        sel: &Selector,
+        start: i64,
+        end: i64,
+        step: i64,
+    ) -> Result<Vec<(i64, Aggregate)>> {
+        if step <= 0 {
+            return Err(Error::BadConfig("step must be positive"));
+        }
+        let mut merged: BTreeMap<i64, Aggregate> = BTreeMap::new();
+        for s in self.inner.resolve(sel) {
+            for (w, a) in self.inner.windows(&s, start, end, step)? {
+                merged.entry(w).or_insert(Aggregate::EMPTY).merge(&a);
+            }
+        }
+        Ok(merged.into_iter().collect())
+    }
+
     // seals everything in memory and, if nothing raced in, truncates the wal
     pub fn flush(&self) -> Result<()> {
         self.inner.flush()
@@ -221,7 +264,7 @@ impl Engine {
                 st.compressed_bytes += c.ts_bytes + c.val_bytes;
             }
         }
-        st.wal_bytes = self.inner.wal.lock().unwrap().size();
+        st.wal_bytes = self.inner.wal_bytes();
         st.cache_bytes = self.inner.cache.bytes();
         st.last_maintenance_error = self.inner.last_err.lock().unwrap().clone();
         st
@@ -267,14 +310,39 @@ impl Inner {
             }
         }
 
-        let (wal, recs) = Wal::open(&cfg.dir.join("wal.log"), cfg.sync)?;
+        // a series lives in exactly one shard, so replaying shard by shard keeps its write order
+        let mut wal = Vec::with_capacity(cfg.wal_shards);
+        let mut recs = Vec::new();
+        for i in 0..cfg.wal_shards {
+            let (w, r) = Wal::open(&cfg.dir.join(format!("wal-{i}.log")), cfg.sync)?;
+            wal.push(Mutex::new(w));
+            recs.extend(r);
+        }
+        // files left by a run with more shards: refuse if they hold data, else tidy up
+        for entry in fs::read_dir(&cfg.dir)? {
+            let path = entry?.path();
+            let idx = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("wal-"))
+                .and_then(|n| n.strip_suffix(".log"))
+                .and_then(|n| n.parse::<usize>().ok());
+            if idx.is_some_and(|i| i >= cfg.wal_shards) {
+                if fs::metadata(&path)?.len() > 0 {
+                    return Err(Error::BadConfig(
+                        "wal files from a run with more wal_shards still hold data; reopen with the old value and flush",
+                    ));
+                }
+                fs::remove_file(path)?;
+            }
+        }
         let inner = Arc::new(Inner {
             cfg,
             chunk_dir,
             catalog: RwLock::new(map),
             index: RwLock::new(index),
             cat_file: Mutex::new(cat_file),
-            wal: Mutex::new(wal),
+            wal,
             next_id: AtomicU64::new(max_id + 1),
             cache,
             maintenance: Mutex::new(()),
@@ -302,6 +370,14 @@ impl Inner {
             st.apply(&[r.point], &[r.late], &inner.cfg, &inner.next_id);
         }
         Ok(inner)
+    }
+
+    fn wal_for(&self, id: SeriesId) -> &Mutex<Wal> {
+        &self.wal[(id % self.wal.len() as u64) as usize]
+    }
+
+    fn wal_bytes(&self) -> u64 {
+        self.wal.iter().map(|w| w.lock().unwrap().size()).sum()
     }
 
     fn resolve(&self, sel: &Selector) -> Vec<Arc<Series>> {
@@ -345,6 +421,38 @@ impl Inner {
             agg.add(p.value);
         }
         Ok((agg.count > 0).then_some(agg))
+    }
+
+    fn windows(
+        &self,
+        s: &Series,
+        start: i64,
+        end: i64,
+        step: i64,
+    ) -> Result<Vec<(i64, Aggregate)>> {
+        // don't walk empty windows before the first / after the last point of the series
+        let Some((lo, hi)) = s.state.read().unwrap().bounds() else {
+            return Ok(Vec::new());
+        };
+        let mut w = start;
+        if lo > start {
+            let skip = (lo as i128 - start as i128) / step as i128;
+            w = (start as i128 + skip * step as i128) as i64;
+        }
+        let end = end.min(hi.saturating_add(1));
+
+        let mut out = Vec::new();
+        while w < end {
+            let next = w.saturating_add(step).min(end);
+            if let Some(a) = self.agg(s, w, next)? {
+                out.push((w, a));
+            }
+            if next <= w {
+                break;
+            }
+            w = next;
+        }
+        Ok(out)
     }
 
     fn find_id(&self, id: SeriesId) -> Option<Arc<Series>> {
@@ -575,7 +683,7 @@ impl Inner {
             }
             self.expire(s);
         }
-        if self.wal.lock().unwrap().size() > self.cfg.wal_max_bytes {
+        if self.wal_bytes() > self.cfg.wal_max_bytes {
             if let Err(e) = self.flush_locked() {
                 first_err.get_or_insert(e);
             }
@@ -611,7 +719,9 @@ impl Inner {
 
         let guards: Vec<_> = series.iter().map(|s| s.state.write().unwrap()).collect();
         if guards.iter().all(|g| g.is_drained()) {
-            self.wal.lock().unwrap().reset()?;
+            for w in &self.wal {
+                w.lock().unwrap().reset()?;
+            }
         }
         Ok(())
     }

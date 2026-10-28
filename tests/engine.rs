@@ -571,3 +571,139 @@ fn label_selectors_and_cross_series_queries() {
     drop(e);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn windowed_aggregates_match_brute_force() {
+    let dir = tmp("windows");
+    let e = Engine::open(cfg(&dir)).unwrap();
+    let a = SeriesKey::new("w").label("n", "a");
+    let b = SeriesKey::new("w").label("n", "b");
+    fill(&e, &a, 700);
+    for i in 0..400i64 {
+        e.append(&b, 1_000 + i * 15, i as f64).unwrap();
+    }
+    e.flush().unwrap();
+    e.append(&a, 123, 500.0).unwrap(); // late, lands inside a sealed chunk's span
+    e.append(&a, 7_005, 9.0).unwrap();
+
+    let pts = e.query_range(&a, i64::MIN, i64::MAX).unwrap();
+    for (start, end, step) in [(0, 7_100, 250), (-300, 8_000, 1_000), (333, 5_000, 77)] {
+        let got = e.aggregate_windows(&a, start, end, step).unwrap();
+        let mut want = Vec::new();
+        let mut w = start;
+        while w < end {
+            let hi = (w + step).min(end);
+            let vals: Vec<f64> = pts
+                .iter()
+                .filter(|p| p.ts >= w && p.ts < hi)
+                .map(|p| p.value)
+                .collect();
+            if !vals.is_empty() {
+                want.push((w, vals.len() as u64, vals.iter().sum::<f64>()));
+            }
+            w = hi;
+        }
+        assert_eq!(got.len(), want.len(), "{start}..{end} step {step}");
+        for ((gw, ga), (ww, wc, ws)) in got.iter().zip(&want) {
+            assert_eq!((*gw, ga.count), (*ww, *wc));
+            assert!((ga.sum - ws).abs() < 1e-6);
+        }
+    }
+
+    // huge range must not mean a huge loop, and windows are merged across series
+    let all = e
+        .aggregate_windows_select(&Selector::new("w"), i64::MIN, i64::MAX, 100_000)
+        .unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].1.count, 702 + 400);
+    assert!(matches!(
+        e.aggregate_windows(&a, 0, 10, 0),
+        Err(Error::BadConfig(_))
+    ));
+    assert!(e.aggregate_windows(&a, 50, 50, 10).unwrap().is_empty());
+    drop(e);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn glob_matchers_through_the_engine() {
+    let dir = tmp("glob");
+    let e = Engine::open(cfg(&dir)).unwrap();
+    for host in ["web-1", "web-2", "db-1", "cache"] {
+        e.append(&SeriesKey::new("up").label("host", host), 1, 1.0)
+            .unwrap();
+    }
+    let n = |sel: Selector| e.select(&sel).len();
+    assert_eq!(n(Selector::new("up").like("host", "web-*")), 2);
+    assert_eq!(n(Selector::new("up").like("host", "*-1")), 2);
+    assert_eq!(
+        n(Selector::new("up")
+            .like("host", "web-?")
+            .ne("host", "web-2")),
+        1
+    );
+    assert_eq!(n(Selector::new("up").like("host", "*")), 4);
+    assert_eq!(n(Selector::new("up").like("region", "*")), 0);
+    let a = e
+        .aggregate_select(&Selector::new("up").like("host", "w*"), 0, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.count, 2);
+    drop(e);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn crash_recovery_across_wal_shards() {
+    let dir = tmp("shards");
+    let mut c = cfg(&dir);
+    c.flush_on_close = false;
+    c.wal_shards = 4;
+    c.maintenance_interval = Duration::from_secs(3600);
+    let keys: Vec<_> = (0..13)
+        .map(|i| SeriesKey::new("s").label("i", i.to_string()))
+        .collect();
+    {
+        let e = Engine::open(c.clone()).unwrap();
+        for (n, k) in keys.iter().enumerate() {
+            fill(&e, k, 120 + n as i64);
+            e.append(k, 7, -1.0).unwrap(); // late, replayed from the same shard
+        }
+    }
+    // data really is spread over several wal files
+    let used = (0..4)
+        .filter(|i| {
+            std::fs::metadata(dir.join(format!("wal-{i}.log")))
+                .unwrap()
+                .len()
+                > 0
+        })
+        .count();
+    assert!(used >= 2, "only {used} wal files in use");
+
+    // a different shard count with data still in the logs is refused, not silently misrouted
+    let mut other = c.clone();
+    other.wal_shards = 2;
+    assert!(matches!(Engine::open(other), Err(Error::BadConfig(_))));
+
+    let e = Engine::open(c).unwrap();
+    for (n, k) in keys.iter().enumerate() {
+        let pts = e.query_range(k, i64::MIN, i64::MAX).unwrap();
+        assert_eq!(pts.len(), 121 + n, "series {n}");
+        assert!(pts.contains(&Point::new(7, -1.0)));
+    }
+    e.flush().unwrap();
+    assert_eq!(e.stats().wal_bytes, 0);
+    drop(e);
+
+    // after a clean flush the shard count may change
+    let mut other = cfg(&dir);
+    other.wal_shards = 2;
+    let e = Engine::open(other).unwrap();
+    assert_eq!(
+        e.query_range(&keys[5], i64::MIN, i64::MAX).unwrap().len(),
+        126
+    );
+    drop(e);
+    std::fs::remove_dir_all(dir).unwrap();
+}

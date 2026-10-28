@@ -63,10 +63,13 @@ src/
   chunk.rs            ActiveChunk, SealedChunk, file framing, recovery scan
   series.rs           per-series state: active / frozen / sealed + snapshots
   index.rs            inverted label index (name / label=value -> sorted series ids)
-  wal.rs, catalog.rs  write-ahead log, series catalog (both crc'd, torn-tail safe)
+  wal.rs, catalog.rs  write-ahead log (sharded), series catalog (both crc'd, torn-tail safe)
+  bin/crash_writer.rs helper process for the hard-kill test
   engine.rs           public API, background worker, flush, compaction, retention
-tests/engine.rs       end-to-end: crash recovery, compaction, concurrency
-examples/ingest_bench.rs
+tests/engine.rs       end-to-end: recovery, compaction, late writes, labels, concurrency,
+                      randomized comparison against a BTreeMap model
+tests/crash.rs        kills a writer process mid-flight, reopens, verifies
+examples/             ingest_bench.rs, concurrent_bench.rs
 ```
 
 On disk:
@@ -115,8 +118,19 @@ passes `ne`), so resolving a selector never scans the catalog.
 - `aggregate_by(sel, "dc", ..)` is a GROUP BY label (series lacking the label are
   grouped under `""`).
 
-The index is memory-only and rebuilt from the series catalog on open. Matchers are
-exact string comparisons; there is no regex matcher.
+`like(label, "web-*")` is a glob matcher (`*` any run, `?` one character) that walks
+only the distinct values of that label. There is no full regex: the crate has no
+dependencies and that is worth more than a regex engine here.
+
+The index is memory-only and rebuilt from the series catalog on open.
+
+### Downsampling
+
+`aggregate_windows(key, start, end, step)` (and `aggregate_windows_select` across
+series) returns one aggregate per `step`-wide window, aligned to `start`, empty
+windows omitted. Windows are clamped to the span the series actually holds, so
+`i64::MIN..i64::MAX` is fine, and any window that covers whole chunks is answered from
+their stats.
 
 ## Concurrency model
 
@@ -166,6 +180,13 @@ fully contained in a larger chunk of the same series (crash during compaction)
 are dropped, then the WAL is replayed (in-order records newer than the last sealed ts, plus all late records).
 Torn WAL/catalog tails are cut at the first bad checksum.
 
+This is tested with real crashes, not simulated ones: `tests/crash.rs` runs the writer
+as a separate process (a deterministic stream of in-order points plus late overwrites,
+with sealing, merging, checkpoints and compaction constantly in flight), kills it with
+`TerminateProcess` / `SIGKILL` at ten different moments on the same directory, reopens
+it in a second process after each kill and checks that every acknowledged point is
+present, values are exactly those of the model, and nothing else appeared.
+
 ## Numbers
 
 `cargo run --release --example ingest_bench` (8 series x 500k points, 10 s
@@ -193,6 +214,18 @@ file-per-column layout with small chunks.
 | gorilla encode / decode | ~9.6 / ~12.3 M pts/s |
 | engine `append_batch` (WAL + active chunk) | ~2.4 M pts/s |
 
+Writer scaling (`cargo run --release --example concurrent_bench`, N threads, one series
+each, 256-point batches, alternating runs on the same machine, `WAL_SHARDS` env var):
+
+| `wal_shards` | 1 thread | 8 threads |
+|---|---|---|
+| 1 (single log) | ~1.7-1.8 M pts/s | ~2.4 M pts/s (flat: the log lock serialises writers) |
+| 4 | ~2.2-2.3 M pts/s | ~5.3-5.9 M pts/s |
+| 8 (default) | ~1.3-1.9 M pts/s | ~7.5-8.3 M pts/s |
+
+Single-thread numbers on this laptop vary by +-30% run to run; the 8-thread gap is not
+noise.
+
 Backpressure: appends to a series block once it has more than
 `max_frozen_chunks` waiting for the sealer, and fail if the sealer is erroring.
 
@@ -200,7 +233,10 @@ Backpressure: appends to a series block once it has more than
 
 - Late writes cost a bucket rewrite when merged (see above).
 - The block cache evicts FIFO, not LRU.
-- WAL records are 29 bytes uncompressed; the WAL is one file for all series.
+- WAL records are 29 bytes uncompressed. The WAL is sharded by series id (`wal_shards`,
+  default 8); changing the count needs a clean `flush` first, otherwise open refuses.
+- A batch is validated atomically but not made durable atomically: after a crash a batch
+  that was in flight may survive as a prefix. Acknowledged batches are never lost.
 - Sum is a plain f64 accumulation.
 - No fsync of the chunk directory after renames.
 

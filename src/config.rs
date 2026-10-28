@@ -26,6 +26,9 @@ pub struct Config {
     pub sync: SyncMode,
     pub maintenance_interval: Duration,
     pub wal_max_bytes: u64,
+    // wal files; a series always logs to the same one (id % wal_shards), so writers to
+    // different series rarely share a lock. changing it needs a clean flush first
+    pub wal_shards: usize,
     // drop sealed chunks older than (series last_ts - retention)
     pub retention: Option<i64>,
     pub flush_on_close: bool,
@@ -43,6 +46,7 @@ impl Config {
             sync: SyncMode::Never,
             maintenance_interval: Duration::from_millis(500),
             wal_max_bytes: 64 << 20,
+            wal_shards: 8,
             retention: None,
             flush_on_close: true,
         }
@@ -54,6 +58,9 @@ impl Config {
         }
         if self.max_points_per_chunk == 0 {
             return Err(Error::BadConfig("max_points_per_chunk must be positive"));
+        }
+        if self.wal_shards == 0 {
+            return Err(Error::BadConfig("wal_shards must be positive"));
         }
         if matches!(self.retention, Some(r) if r <= 0) {
             return Err(Error::BadConfig("retention must be positive"));

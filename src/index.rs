@@ -1,6 +1,7 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
-use crate::model::{Matcher, Selector, SeriesId, SeriesKey};
+use crate::model::{glob_match, Matcher, Selector, SeriesId, SeriesKey};
 
 // Inverted index: metric name -> series ids, and (label, value) -> series ids. Every list
 // stays sorted so selectors resolve with merge-style intersect / subtract.
@@ -8,6 +9,8 @@ use crate::model::{Matcher, Selector, SeriesId, SeriesKey};
 pub struct LabelIndex {
     by_name: HashMap<String, Vec<SeriesId>>,
     postings: HashMap<(String, String), Vec<SeriesId>>,
+    // label name -> distinct values seen, so a glob only walks values of its own label
+    values: HashMap<String, Vec<String>>,
 }
 
 fn add_sorted(v: &mut Vec<SeriesId>, id: SeriesId) {
@@ -44,7 +47,13 @@ impl LabelIndex {
     pub fn insert(&mut self, key: &SeriesKey, id: SeriesId) {
         add_sorted(self.by_name.entry(key.name().to_string()).or_default(), id);
         for (k, v) in key.labels() {
-            add_sorted(self.postings.entry((k.clone(), v.clone())).or_default(), id);
+            match self.postings.entry((k.clone(), v.clone())) {
+                Entry::Occupied(mut e) => add_sorted(e.get_mut(), id),
+                Entry::Vacant(e) => {
+                    self.values.entry(k.clone()).or_default().push(v.clone());
+                    add_sorted(e.insert(Vec::new()), id);
+                }
+            }
         }
     }
 
@@ -64,6 +73,17 @@ impl LabelIndex {
                         ids = subtract(&ids, p);
                     }
                 }
+                Matcher::Like(k, pat) => {
+                    let mut hits: Vec<SeriesId> = Vec::new();
+                    for v in self.values.get(k).into_iter().flatten() {
+                        if glob_match(pat, v) {
+                            hits.extend_from_slice(&self.postings[&(k.clone(), v.clone())]);
+                        }
+                    }
+                    hits.sort_unstable();
+                    hits.dedup();
+                    ids = intersect(&ids, &hits);
+                }
             }
             if ids.is_empty() {
                 break;
@@ -76,6 +96,26 @@ impl LabelIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glob_cases() {
+        for (p, s, want) in [
+            ("web-*", "web-1", true),
+            ("web-*", "web-", true),
+            ("web-*", "db-1", false),
+            ("*", "", true),
+            ("?", "", false),
+            ("a*b*c", "aXXbYYc", true),
+            ("a*b*c", "aXXbYY", false),
+            ("h?", "h12", false),
+            ("*1", "x11", true),
+            ("", "", true),
+            ("", "a", false),
+            ("é?", "éa", true),
+        ] {
+            assert_eq!(glob_match(p, s), want, "{p:?} vs {s:?}");
+        }
+    }
 
     #[test]
     fn set_helpers() {
@@ -108,6 +148,11 @@ mod tests {
             Selector::new("cpu").eq("dc", "fra").ne("host", "h2"),
             Selector::new("cpu").ne("role", "db"),
             Selector::new("mem").eq("role", "db").eq("host", "h0"),
+            Selector::new("cpu").like("host", "h[0-9]"),
+            Selector::new("cpu").like("host", "h?"),
+            Selector::new("cpu").like("host", "h1*").ne("dc", "ams"),
+            Selector::new("cpu").like("role", "*"),
+            Selector::new("cpu").like("nope", "*"),
             Selector::new("cpu").eq("nope", "x"),
             Selector::new("missing"),
         ];
