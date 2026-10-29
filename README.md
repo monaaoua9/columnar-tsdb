@@ -191,6 +191,8 @@ present, values are exactly those of the model, and nothing else appeared.
 
 ## Numbers
 
+A more recent three-run set is in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Its read rows (1 h window, full scan) are far slower than the ones below because of how this laptop reads freshly written files; the doc explains.
+
 `cargo run --release --example ingest_bench` (8 series x 500k points, 10 s
 interval, 1-day buckets, noisy 2-decimal gauge, laptop, Windows 11). The ingest
 figure is sustained: writers are throttled by the sealer (`max_frozen_chunks`), so
