@@ -9,6 +9,8 @@ compression, immutable columnar chunks, a write-ahead log, a time-bucket index
 that answers aggregates from chunk metadata, and a background thread that seals
 and compacts chunks while reads and writes keep going.
 
+Why it is built this way: [docs/DESIGN.md](docs/DESIGN.md).
+
 ```rust
 use columnar_tsdb::{Config, Engine, Selector, SeriesKey};
 
