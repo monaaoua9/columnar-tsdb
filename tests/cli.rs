@@ -128,3 +128,47 @@ fn bad_input_exits_nonzero() {
     assert!(!o.status.success());
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn serve_requires_the_token_when_given() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::net::TcpStream;
+
+    let d = tmp("serve");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tsdb"))
+        .args([
+            "serve",
+            d.to_str().unwrap(),
+            "127.0.0.1:0",
+            "--token",
+            "tok",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.as_mut().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let addr = line
+        .trim()
+        .strip_prefix("listening on http://")
+        .unwrap()
+        .to_string();
+
+    let ask = |hdr: &str| {
+        let mut c = TcpStream::connect(&addr).unwrap();
+        c.write_all(format!("GET /metrics HTTP/1.1\r\n{hdr}\r\n").as_bytes())
+            .unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).unwrap();
+        out.split(' ').nth(1).unwrap().to_string()
+    };
+    assert_eq!(ask(""), "401");
+    assert_eq!(ask("Authorization: Bearer tok\r\n"), "200");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let _ = std::fs::remove_dir_all(d);
+}

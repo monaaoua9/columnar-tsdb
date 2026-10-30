@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use columnar_tsdb::lineproto;
 use columnar_tsdb::query::{self, parse_duration, Ctx, Value};
-use columnar_tsdb::server::Server;
+use columnar_tsdb::server::{Server, ServerConfig};
 use columnar_tsdb::{Config, Engine, Error};
 
 const USAGE: &str = "\
@@ -18,7 +18,8 @@ usage: tsdb <command> <data-dir> [args]
   stats    <dir>                     sizes and counters
   compact  <dir>                     merge every bucket
   snapshot <dir> <dest>              online copy into an empty dir
-  serve    <dir> [addr]              http on addr (default 127.0.0.1:8086)
+  serve    <dir> [addr] [--token T]  http on addr (default 127.0.0.1:8086);
+                                     token falls back to $TSDB_TOKEN
 
 T is an integer, `now` or `now-5m`; D is an integer or a duration like 30s.";
 
@@ -176,9 +177,19 @@ fn run(args: &[String]) -> Result<(), String> {
             .map_err(io_err)?;
         }
         "serve" => {
-            let addr = rest.first().map_or("127.0.0.1:8086", String::as_str);
+            let (addr, extra) = match rest.first() {
+                Some(a) if !a.starts_with("--") => (a.as_str(), &rest[1..]),
+                _ => ("127.0.0.1:8086", rest),
+            };
+            let fl = flags(extra, &["--token"])?;
+            let token = fl
+                .iter()
+                .find(|f| f.0 == "--token")
+                .map(|f| f.1.to_string())
+                .or_else(|| std::env::var("TSDB_TOKEN").ok())
+                .filter(|t| !t.is_empty());
             let eng = open(dir).map_err(e)?;
-            let srv = Server::start(eng, addr).map_err(e)?;
+            let srv = Server::start_with(eng, addr, ServerConfig { token }).map_err(e)?;
             writeln!(out, "listening on http://{}", srv.addr()).map_err(io_err)?;
             out.flush().map_err(io_err)?;
             // no signal handling without deps: ctrl-c kills us, the wal covers the rest

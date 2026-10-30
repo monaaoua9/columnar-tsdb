@@ -26,6 +26,13 @@ const MAX_BODY: usize = 8 << 20;
 const MAX_HEAD_LINE: u64 = 8192;
 const MAX_CONNS: usize = 64;
 
+#[derive(Clone, Debug, Default)]
+pub struct ServerConfig {
+    // when set, everything except /health needs `Authorization: Bearer <token>`.
+    // This is a shared secret over plain http, not a substitute for TLS
+    pub token: Option<String>,
+}
+
 pub struct Server {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -34,6 +41,15 @@ pub struct Server {
 
 impl Server {
     pub fn start(engine: Engine, addr: impl ToSocketAddrs) -> Result<Server> {
+        Server::start_with(engine, addr, ServerConfig::default())
+    }
+
+    pub fn start_with(
+        engine: Engine,
+        addr: impl ToSocketAddrs,
+        cfg: ServerConfig,
+    ) -> Result<Server> {
+        let token = Arc::new(cfg.token);
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -54,11 +70,11 @@ impl Server {
                             let _ = respond(&mut s, 503, "text/plain", b"busy\n");
                             continue;
                         }
-                        let (e, live) = (engine.clone(), live.clone());
+                        let (e, live, token) = (engine.clone(), live.clone(), token.clone());
                         thread::spawn(move || {
                             let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
                             let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
-                            let _ = serve(&e, s);
+                            let _ = serve(&e, s, token.as_deref());
                             live.fetch_sub(1, Ordering::AcqRel);
                         });
                     }
@@ -99,6 +115,7 @@ struct Req {
     method: String,
     path: String,
     query: Vec<(String, String)>,
+    auth: Option<String>,
     body: Vec<u8>,
 }
 
@@ -168,12 +185,16 @@ fn read_request(stream: &TcpStream) -> io::Result<Req> {
     let (path, qs) = target.split_once('?').unwrap_or((target, ""));
 
     let mut len = 0usize;
+    let mut auth = None;
     loop {
         let h = read_line(&mut r)?;
         if h.is_empty() {
             break;
         }
         if let Some((k, v)) = h.split_once(':') {
+            if k.eq_ignore_ascii_case("authorization") {
+                auth = Some(v.trim().to_string());
+            }
             if k.eq_ignore_ascii_case("content-length") {
                 len = v.trim().parse().map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "bad content-length")
@@ -190,6 +211,7 @@ fn read_request(stream: &TcpStream) -> io::Result<Req> {
         method: method.to_string(),
         path: url_decode(path),
         query: parse_query_string(qs),
+        auth,
         body,
     })
 }
@@ -198,6 +220,7 @@ fn status_text(code: u16) -> &'static str {
     match code {
         200 => "OK",
         204 => "No Content",
+        401 => "Unauthorized",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -209,8 +232,13 @@ fn status_text(code: u16) -> &'static str {
 }
 
 fn respond(s: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) -> io::Result<()> {
+    let challenge = if code == 401 {
+        "WWW-Authenticate: Bearer\r\n"
+    } else {
+        ""
+    };
     let head = format!(
-        "HTTP/1.1 {code} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {code} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{challenge}Connection: close\r\n\r\n",
         status_text(code),
         body.len()
     );
@@ -249,7 +277,16 @@ pub(crate) fn parse_time(s: &str, now: i64) -> Result<i64> {
         .map_err(|_| Error::Query(format!("bad time {s:?}")))
 }
 
-fn serve(engine: &Engine, mut s: TcpStream) -> io::Result<()> {
+// compare without bailing at the first differing byte
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = a.len() != b.len();
+    for i in 0..a.len().max(b.len()) {
+        diff |= a.get(i).copied().unwrap_or(0) != b.get(i).copied().unwrap_or(0);
+    }
+    !diff
+}
+
+fn serve(engine: &Engine, mut s: TcpStream, token: Option<&str>) -> io::Result<()> {
     let req = match read_request(&s) {
         Ok(r) => r,
         Err(e) => {
@@ -266,6 +303,21 @@ fn serve(engine: &Engine, mut s: TcpStream) -> io::Result<()> {
             );
         }
     };
+    if let Some(t) = token {
+        let ok = req
+            .auth
+            .as_deref()
+            .and_then(|a| a.strip_prefix("Bearer "))
+            .is_some_and(|given| ct_eq(given.trim().as_bytes(), t.as_bytes()));
+        if !ok && req.path != "/health" {
+            return respond(
+                &mut s,
+                401,
+                "application/json",
+                &error_body("UNAUTHORIZED", "missing or wrong bearer token"),
+            );
+        }
+    }
     let (code, ctype, body) = route(engine, &req);
     respond(&mut s, code, ctype, &body)
 }
@@ -361,6 +413,16 @@ mod tests {
                 ("c".into(), "".into())
             ]
         );
+    }
+
+    #[test]
+    fn constant_time_compare() {
+        assert!(ct_eq(b"secret", b"secret"));
+        assert!(!ct_eq(b"secret", b"secreT"));
+        assert!(!ct_eq(b"secret", b"secre"));
+        assert!(!ct_eq(b"", b"x"));
+        assert!(ct_eq(b"", b""));
+        assert!(!ct_eq(&[0u8; 256], b""));
     }
 
     #[test]

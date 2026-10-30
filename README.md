@@ -196,7 +196,7 @@ POST /write[?ts=now-5m]                               line protocol body -> 204
 GET  /query?query=...&start=now-1h&end=now&step=30s   -> {"data":{..},"meta":{..}}
 ```
 
-Errors come back as `{"error":{"code":"BAD_QUERY","message":"..."}}`.
+Errors come back as `{"error":{"code":"BAD_QUERY","message":"..."}}`. With a token configured every route except `/health` answers 401 without `Authorization: Bearer <token>`.
 
 `cargo run --bin tsdb -- <command> <dir>`: `import`, `export`, `query`, `series`, `stats`,
 `compact`, `snapshot`, `serve`.
@@ -333,7 +333,7 @@ Backpressure: appends to a series block once it has more than
   the WAL and catalog, and getting that wrong loses data, so it is not here.
 - Query language: no subqueries, no joins on
   different label sets. `rate` extrapolates nothing, it is `increase / (last_ts - first_ts)`.
-- The HTTP server has no auth and no TLS.
+- The HTTP server has no TLS (std has none). An optional bearer token (`ServerConfig`, `tsdb serve --token`) guards everything but `/health`, but it travels in clear text: keep the server on localhost or behind a TLS proxy.
 - Snapshot holds the maintenance lock while it links files, and std mutexes aren't fair: under a
   writer that outruns the sealer it can wait a long time for its turn.
 

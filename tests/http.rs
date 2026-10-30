@@ -145,3 +145,94 @@ fn shutdown_releases_the_port() {
     drop(e);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+fn setup_auth(tag: &str, token: &str) -> (Engine, Server, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("ctsdb-http-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let e = Engine::open(Config::new(&dir)).unwrap();
+    let cfg = columnar_tsdb::server::ServerConfig {
+        token: Some(token.into()),
+    };
+    let s = Server::start_with(e.clone(), "127.0.0.1:0", cfg).unwrap();
+    (e, s, dir)
+}
+
+fn with_auth(
+    srv: &Server,
+    method: &str,
+    path: &str,
+    auth: Option<&str>,
+    body: &str,
+) -> (u16, String) {
+    let hdr = auth.map_or(String::new(), |a| format!("Authorization: {a}\r\n"));
+    http(
+        srv,
+        &format!(
+            "{method} {path} HTTP/1.1\r\nHost: x\r\n{hdr}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
+#[test]
+fn bearer_token_guards_everything_but_health() {
+    let (e, srv, dir) = setup_auth("auth", "s3cret");
+
+    assert_eq!(get(&srv, "/health").0, 200);
+    for (m, p) in [
+        ("GET", "/metrics"),
+        ("GET", "/query?query=x"),
+        ("POST", "/write"),
+    ] {
+        let (c, b) = with_auth(&srv, m, p, None, "m v=1 1\n");
+        assert_eq!(c, 401, "{m} {p}");
+        assert!(b.contains("UNAUTHORIZED"), "{b}");
+        for bad in [
+            "Bearer nope",
+            "Bearer s3cre",
+            "Bearer s3cretx",
+            "s3cret",
+            "Basic s3cret",
+            "Bearer ",
+        ] {
+            assert_eq!(
+                with_auth(&srv, m, p, Some(bad), "m v=1 1\n").0,
+                401,
+                "{bad:?}"
+            );
+        }
+    }
+    // nothing leaked through the rejected writes
+    assert!(e.list_series().is_empty());
+
+    assert_eq!(
+        with_auth(&srv, "POST", "/write", Some("Bearer s3cret"), "m v=1 1\n").0,
+        204
+    );
+    assert_eq!(
+        with_auth(&srv, "GET", "/metrics", Some("Bearer s3cret"), "").0,
+        200
+    );
+    // header name is case-insensitive
+    let raw = "GET /metrics HTTP/1.1\r\nauthorization: Bearer s3cret\r\n\r\n";
+    assert_eq!(http(&srv, raw).0, 200);
+    assert_eq!(e.list_series().len(), 1);
+
+    srv.shutdown();
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn rejection_carries_a_challenge_header() {
+    let (e, srv, dir) = setup_auth("chal", "t");
+    let mut c = TcpStream::connect(srv.addr()).unwrap();
+    c.write_all(b"GET /metrics HTTP/1.1\r\n\r\n").unwrap();
+    let mut out = String::new();
+    c.read_to_string(&mut out).unwrap();
+    assert!(out.starts_with("HTTP/1.1 401 Unauthorized"), "{out}");
+    assert!(out.contains("WWW-Authenticate: Bearer"), "{out}");
+    srv.shutdown();
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}
