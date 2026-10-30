@@ -17,6 +17,7 @@ pub mod funcs;
 mod json;
 pub mod lineproto;
 pub mod query;
+pub mod regex;
 pub mod rollup;
 pub mod server;
 pub mod sketch;
