@@ -44,6 +44,7 @@ fn batch(b: u64) -> Vec<Point> {
 }
 
 // the delete that follows batch b, if any: [lo, hi)
+#[allow(clippy::manual_is_multiple_of)]
 fn delete_of(b: u64) -> Option<(i64, i64)> {
     if (b + 1) % 7 != 0 {
         return None;
