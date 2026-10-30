@@ -8,9 +8,13 @@ use std::process::{Command, Stdio};
 const EXE: &str = env!("CARGO_BIN_EXE_crash_writer");
 
 // returns how many batches the writer had acknowledged when it died
-fn run_and_kill(dir: &str, first: u64, extra: u64) -> u64 {
-    let mut child = Command::new(EXE)
-        .args(["write", dir, &first.to_string()])
+fn run_and_kill(dir: &str, first: u64, extra: u64, del: bool) -> u64 {
+    let mut cmd = Command::new(EXE);
+    cmd.args(["write", dir, &first.to_string()]);
+    if del {
+        cmd.arg("del");
+    }
+    let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -36,11 +40,13 @@ fn run_and_kill(dir: &str, first: u64, extra: u64) -> u64 {
     acked
 }
 
-fn verify(dir: &str, acked: u64) {
-    let o = Command::new(EXE)
-        .args(["verify", dir, &acked.to_string()])
-        .output()
-        .unwrap();
+fn verify(dir: &str, acked: u64, del: bool) {
+    let mut cmd = Command::new(EXE);
+    cmd.args(["verify", dir, &acked.to_string()]);
+    if del {
+        cmd.arg("del");
+    }
+    let o = cmd.output().unwrap();
     assert!(
         o.status.success(),
         "verify failed after {acked} acked batches:\n{}",
@@ -58,9 +64,26 @@ fn survives_repeated_hard_kills() {
     // every 40th batch, compact at every 25th, background merges in between)
     let mut acked = 0;
     for extra in [40, 90, 11, 250, 25, 150, 60, 400, 4, 100] {
-        acked = run_and_kill(dir_s, acked, extra);
-        verify(dir_s, acked);
+        acked = run_and_kill(dir_s, acked, extra, false);
+        verify(dir_s, acked, false);
     }
     assert!(acked > 1_000, "only {acked} batches acknowledged in total");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+// same, with a delete every 7th step. The run lengths are different on purpose and not
+// multiples of 7, so kills land before, inside and after deletes.
+#[test]
+fn survives_hard_kills_with_deletes() {
+    let dir = std::env::temp_dir().join(format!("ctsdb-crash-del-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let dir_s = dir.to_str().unwrap();
+
+    let mut acked = 0;
+    for extra in [33, 71, 9, 160, 22, 97, 45, 210, 6, 58, 130, 17] {
+        acked = run_and_kill(dir_s, acked, extra, true);
+        verify(dir_s, acked, true);
+    }
+    assert!(acked > 800, "only {acked} batches acknowledged in total");
     std::fs::remove_dir_all(dir).unwrap();
 }
