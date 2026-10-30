@@ -61,6 +61,8 @@ pub enum Expr {
     Num(f64),
     Select(Selector, Option<i64>),
     Call(Func, Selector, Option<i64>),
+    // evaluate the inner expression `d` ms in the past, report at the original timestamps
+    Offset(Box<Expr>, i64),
     Agg(AggOp, Vec<String>, Box<Expr>),
     TopK {
         k: usize,
@@ -236,6 +238,14 @@ fn lex(src: &str) -> Result<Vec<(Tok, usize)>> {
         out.push((tok, at));
     }
     Ok(out)
+}
+
+fn shifted(e: Expr, off: i64) -> Expr {
+    if off == 0 {
+        e
+    } else {
+        Expr::Offset(Box::new(e), off)
+    }
 }
 
 struct Parser {
@@ -445,14 +455,14 @@ impl Parser {
             let Some(func) = Func::parse(base, param) else {
                 return err(format!("unknown function {name:?} at {at}"));
             };
-            let (sel, range) = self.selector()?;
+            let (sel, range, off) = self.selector()?;
             self.expect(Tok::RParen)?;
-            return Ok(Expr::Call(func, sel, range));
+            return Ok(shifted(Expr::Call(func, sel, range), off));
         }
 
         self.pos -= 1; // un-eat the name, selector() reads it
-        let (sel, range) = self.selector()?;
-        Ok(Expr::Select(sel, range))
+        let (sel, range, off) = self.selector()?;
+        Ok(shifted(Expr::Select(sel, range), off))
     }
 
     fn label_list(&mut self) -> Result<Vec<String>> {
@@ -468,7 +478,7 @@ impl Parser {
         Ok(v)
     }
 
-    fn selector(&mut self) -> Result<(Selector, Option<i64>)> {
+    fn selector(&mut self) -> Result<(Selector, Option<i64>, i64)> {
         let mut sel = Selector::new(self.ident()?);
         if self.eat(&Tok::LBrace) {
             while !self.eat(&Tok::RBrace) {
@@ -511,7 +521,16 @@ impl Parser {
             }
             self.expect(Tok::RBrack)?;
         }
-        Ok((sel, range))
+        let mut off = 0;
+        if matches!(self.peek(), Some(Tok::Ident(s)) if s == "offset") {
+            self.pos += 1;
+            let at = self.at();
+            match self.next() {
+                Some(Tok::Dur(d)) => off = d,
+                _ => return err(format!("expected a duration after offset at {at}")),
+            }
+        }
+        Ok((sel, range, off))
     }
 }
 
@@ -575,6 +594,26 @@ mod tests {
         assert!(parse("sum by (a) (x) by (b)").is_err());
         // a metric that happens to be called `count` still parses as a selector
         assert_eq!(parse("count").unwrap(), Expr::Select(sel("count"), None));
+    }
+
+    #[test]
+    fn offset_modifier() {
+        assert_eq!(
+            parse("cpu offset 1h").unwrap(),
+            Expr::Offset(Box::new(Expr::Select(sel("cpu"), None)), 3_600_000)
+        );
+        assert_eq!(
+            parse("rate(reqs[5m] offset 30s)").unwrap(),
+            Expr::Offset(
+                Box::new(Expr::Call(Func::Rate, sel("reqs"), Some(300_000))),
+                30_000
+            )
+        );
+        assert!(parse("cpu offset").is_err());
+        assert!(parse("cpu offset x").is_err());
+        assert!(parse("cpu offset 5").is_err());
+        // `offset` as a plain metric name still works
+        assert_eq!(parse("offset").unwrap(), Expr::Select(sel("offset"), None));
     }
 
     #[test]

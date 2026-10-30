@@ -164,3 +164,48 @@ fn eval_errors() {
     drop(e);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn offset_looks_into_the_past() {
+    let (e, dir) = open("offset");
+    seed(&e);
+    // load of web-1 is flat 10, but make the "present" differ: bump host web-1 after 200s
+    let k = SeriesKey::new("load").label("host", "web-1");
+    for i in 20..30 {
+        e.append(&k, i * 10_000 + 5_000, 99.0).unwrap();
+    }
+    let ctx = Ctx::instant(0, 300_000);
+    let now = vector(query::run(&e, r#"load{host="web-1"}"#, &ctx).unwrap());
+    assert_eq!(now[0].1, vec![(300_000, 99.0)]);
+
+    // five minutes earlier there was nothing before 0 ... so offset 100s sees the flat part
+    let past = vector(query::run(&e, r#"load{host="web-1"} offset 100s"#, &ctx).unwrap());
+    // evaluated over [-100s, 200s): last sample there is the 190s one (value 10), reported at 300s
+    assert_eq!(past[0].1, vec![(300_000, 10.0)]);
+
+    // the difference is a one-liner now
+    let diff = vector(
+        query::run(
+            &e,
+            r#"load{host="web-1"} - load{host="web-1"} offset 100s"#,
+            &ctx,
+        )
+        .unwrap(),
+    );
+    assert_eq!(diff[0].1, vec![(300_000, 89.0)]);
+
+    // offset inside a call, stepped: timestamps stay on the caller's grid
+    let st = Ctx::stepped(100_000, 200_000, 50_000);
+    let r = vector(
+        query::run(
+            &e,
+            r#"count_over_time(load{host="web-1"}[30s] offset 60s)"#,
+            &st,
+        )
+        .unwrap(),
+    );
+    let ts: Vec<i64> = r[0].1.iter().map(|p| p.0).collect();
+    assert_eq!(ts, vec![100_000, 150_000]);
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}

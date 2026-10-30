@@ -72,6 +72,24 @@ fn go(engine: &Engine, e: &Expr, ctx: &Ctx) -> Result<Value> {
         Expr::Num(n) => Ok(Value::Scalar(*n)),
         Expr::Select(sel, range) => reduce(engine, sel, *range, Func::Last, ctx, true),
         Expr::Call(f, sel, range) => reduce(engine, sel, *range, *f, ctx, false),
+        Expr::Offset(inner, d) => {
+            let shifted = Ctx {
+                start: ctx.start.saturating_sub(*d),
+                end: ctx.end.saturating_sub(*d),
+                ..*ctx
+            };
+            Ok(match go(engine, inner, &shifted)? {
+                Value::Vector(mut rows) => {
+                    for r in &mut rows {
+                        for p in &mut r.points {
+                            p.ts = p.ts.saturating_add(*d);
+                        }
+                    }
+                    Value::Vector(rows)
+                }
+                scalar => scalar,
+            })
+        }
         Expr::Agg(op, by, arg) => match go(engine, arg, ctx)? {
             Value::Scalar(_) => qerr("cannot aggregate a scalar"),
             Value::Vector(rows) => Ok(Value::Vector(aggregate(*op, by, rows))),

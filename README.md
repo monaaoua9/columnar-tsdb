@@ -160,6 +160,7 @@ quantile_over_time(0.99, latency[5m])          p50 p90 p95 p99 shortcuts exist a
 sum(rate(reqs[1m])) by (host)                  across-series sum/avg/min/max/count
 topk(5, max_over_time(cpu[1h]))                bottomk too
 rate(reqs[1m]) * 60 > 100                      scalar arithmetic; comparisons filter
+load - load offset 1h                          compare with the past (offset also goes inside: rate(x[5m] offset 1d))
 sum(rate(a[1m])) by (host) / sum(b) by (host)  vector ops match on identical labels
 ```
 
@@ -330,7 +331,7 @@ Backpressure: appends to a series block once it has more than
 - No fsync of the chunk directory after renames.
 - No delete API. Data leaves through `retention` only: a delete needs a tombstone record in
   the WAL and catalog, and getting that wrong loses data, so it is not here.
-- Query language: no subqueries, no `offset`, no joins on
+- Query language: no subqueries, no joins on
   different label sets. `rate` extrapolates nothing, it is `increase / (last_ts - first_ts)`.
 - The HTTP server has no auth and no TLS.
 - Snapshot holds the maintenance lock while it links files, and std mutexes aren't fair: under a
