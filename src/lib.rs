@@ -9,6 +9,7 @@ mod catalog;
 mod chunk;
 mod crc;
 mod index;
+mod metrics;
 mod series;
 mod wal;
 
@@ -29,5 +30,6 @@ mod testutil;
 
 pub use config::{Config, SyncMode};
 pub use engine::{Engine, EngineStats};
+pub use metrics::Metrics;
 pub use error::{Error, Result};
 pub use model::{Aggregate, Matcher, Point, Selector, SeriesKey};

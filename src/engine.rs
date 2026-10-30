@@ -12,6 +12,7 @@ use crate::chunk::{self, BlockCache, SealedChunk};
 use crate::config::{Config, SyncMode};
 use crate::error::{Error, Result};
 use crate::index::LabelIndex;
+use crate::metrics::{inc, Counters, Metrics};
 use crate::model::{Aggregate, Point, Selector, SeriesId, SeriesKey};
 use crate::series::{bucket_of, merge_override, Series};
 use crate::snapshot::{self, SnapshotInfo};
@@ -51,6 +52,7 @@ struct Inner {
     signal: Mutex<Signal>,
     wake: Condvar,
     last_err: Mutex<Option<String>>,
+    m: Counters,
     _dir_lock: File,
 }
 
@@ -106,6 +108,10 @@ impl Engine {
             .append(s.id, pts, &late)?;
         let busy = st.apply(pts, &late, &self.inner.cfg, &self.inner.next_id);
         drop(st);
+        let m = &self.inner.m;
+        inc(&m.append_calls, 1);
+        inc(&m.points_appended, pts.len() as u64);
+        inc(&m.late_points, late.iter().filter(|&&l| l).count() as u64);
         if busy {
             self.inner.kick();
         }
@@ -114,6 +120,7 @@ impl Engine {
 
     // points with start <= ts < end, ascending
     pub fn query_range(&self, key: &SeriesKey, start: i64, end: i64) -> Result<Vec<Point>> {
+        inc(&self.inner.m.queries, 1);
         match self.inner.find(key) {
             Some(s) => self.inner.points(&s, start, end),
             None => Ok(Vec::new()),
@@ -122,6 +129,7 @@ impl Engine {
 
     // chunks fully inside [start, end) are answered from their stored stats
     pub fn aggregate(&self, key: &SeriesKey, start: i64, end: i64) -> Result<Option<Aggregate>> {
+        inc(&self.inner.m.queries, 1);
         match self.inner.find(key) {
             Some(s) => Ok(self.inner.agg(&s, start, end)?.filter(|a| a.count > 0)),
             None => Ok(None),
@@ -144,6 +152,7 @@ impl Engine {
         start: i64,
         end: i64,
     ) -> Result<Vec<(SeriesKey, Vec<Point>)>> {
+        inc(&self.inner.m.queries, 1);
         let mut out = Vec::new();
         for s in self.inner.resolve(sel) {
             let pts = self.inner.points(&s, start, end)?;
@@ -256,6 +265,15 @@ impl Engine {
         self.inner.snapshot(dest.as_ref())
     }
 
+    pub fn metrics(&self) -> Metrics {
+        self.inner.m.read()
+    }
+
+    // prometheus text for metrics() + stats()
+    pub fn render_metrics(&self) -> String {
+        self.metrics().render(&self.stats())
+    }
+
     pub fn stats(&self) -> EngineStats {
         let series = self.inner.series_list();
         let mut st = EngineStats {
@@ -360,6 +378,7 @@ impl Inner {
             }),
             wake: Condvar::new(),
             last_err: Mutex::new(None),
+            m: Counters::default(),
             _dir_lock: lock,
         });
 
@@ -543,6 +562,7 @@ impl Inner {
             st.frozen.retain(|x| x.id != f.id);
             st.insert_sealed(Arc::new(sealed.with_cache(self.cache.clone())));
         }
+        inc(&self.m.chunks_sealed, todo.len() as u64);
         Ok(todo.len())
     }
 
@@ -608,6 +628,7 @@ impl Inner {
                 g.mark_obsolete();
             }
         }
+        inc(&self.m.ooo_merges, groups.len() as u64);
         Ok(groups.len())
     }
 
@@ -658,6 +679,7 @@ impl Inner {
                 g.mark_obsolete();
             }
         }
+        inc(&self.m.compactions, groups.len() as u64);
         Ok(groups.len())
     }
 
@@ -671,6 +693,7 @@ impl Inner {
                 let keep = c.stats.max_ts >= cutoff;
                 if !keep {
                     c.mark_obsolete();
+                    inc(&self.m.chunks_expired, 1);
                 }
                 keep
             });
@@ -680,6 +703,7 @@ impl Inner {
 
     fn maintain(&self) -> Result<()> {
         let _m = self.maintenance.lock().unwrap();
+        inc(&self.m.maintenance_runs, 1);
         let mut first_err = None;
         for s in &self.series_list() {
             let r = self
@@ -697,7 +721,10 @@ impl Inner {
             }
         }
         match first_err {
-            Some(e) => Err(e),
+            Some(e) => {
+                inc(&self.m.maintenance_errors, 1);
+                Err(e)
+            }
             None => Ok(()),
         }
     }
@@ -765,6 +792,7 @@ impl Inner {
         let g = self.cat_file.lock().unwrap();
         info.copied_bytes += fs::copy(self.cfg.dir.join("series.cat"), dest.join("series.cat"))?;
         drop(g);
+        inc(&self.m.snapshots, 1);
         Ok(info)
     }
 

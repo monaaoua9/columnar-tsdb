@@ -707,3 +707,29 @@ fn crash_recovery_across_wal_shards() {
     drop(e);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn metrics_follow_activity() {
+    let dir = tmp("metrics");
+    let e = Engine::open(cfg(&dir)).unwrap();
+    let k = key();
+    fill(&e, &k, 400);
+    e.append(&k, 5, 1.0).unwrap(); // late
+    e.flush().unwrap();
+    e.query_range(&k, 0, 100).unwrap();
+    e.aggregate(&k, 0, 100).unwrap();
+
+    let m = e.metrics();
+    assert_eq!(m.points_appended, 401);
+    assert_eq!(m.late_points, 1);
+    assert_eq!(m.append_calls, 401);
+    assert!(m.chunks_sealed >= 8, "{m:?}");
+    assert_eq!(m.queries, 2);
+    assert!(m.ooo_merges >= 1);
+
+    let text = e.render_metrics();
+    assert!(text.contains("tsdb_points_appended_total 401"));
+    assert!(text.contains("tsdb_series 1"));
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}
