@@ -12,6 +12,8 @@ mod index;
 mod series;
 mod wal;
 
+pub mod funcs;
+
 pub mod compress;
 pub mod config;
 pub mod engine;
