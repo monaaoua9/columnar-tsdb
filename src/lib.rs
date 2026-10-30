@@ -14,6 +14,7 @@ mod wal;
 
 pub mod funcs;
 pub mod lineproto;
+pub mod sketch;
 
 pub mod compress;
 pub mod config;
