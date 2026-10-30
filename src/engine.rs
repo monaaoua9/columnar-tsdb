@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::index::LabelIndex;
 use crate::model::{Aggregate, Point, Selector, SeriesId, SeriesKey};
 use crate::series::{bucket_of, merge_override, Series};
+use crate::snapshot::{self, SnapshotInfo};
 use crate::wal::Wal;
 
 #[derive(Clone, Debug, Default)]
@@ -246,6 +247,13 @@ impl Engine {
             n += self.inner.compact_series(s, true)?;
         }
         Ok(n)
+    }
+
+    // Consistent copy of the database into an empty dir while reads and writes keep going.
+    // Sealed chunks are hard-linked (they are immutable), wal and catalog are copied. Open the
+    // result with Engine::open, or snapshot::restore it somewhere else.
+    pub fn snapshot(&self, dest: impl AsRef<Path>) -> Result<SnapshotInfo> {
+        self.inner.snapshot(dest.as_ref())
     }
 
     pub fn stats(&self) -> EngineStats {
@@ -697,6 +705,67 @@ impl Inner {
     fn flush(&self) -> Result<()> {
         let _m = self.maintenance.lock().unwrap();
         self.flush_locked()
+    }
+
+    fn snapshot(&self, dest: &Path) -> Result<SnapshotInfo> {
+        snapshot::empty_target(dest)?;
+        // No sealing / compaction / expiry / wal reset while we copy, so the sealed set is
+        // fixed and the wal still holds everything that isn't sealed. No flush here: with
+        // writers running it would chase them forever. Opening the copy replays the wal.
+        let _m = self.maintenance.lock().unwrap();
+
+        let out = dest.join("chunks");
+        fs::create_dir_all(&out)?;
+        let mut info = SnapshotInfo::default();
+        for entry in fs::read_dir(&self.chunk_dir)? {
+            let meta = entry?.path();
+            if meta.extension().and_then(|e| e.to_str()) != Some("meta") {
+                continue;
+            }
+            // meta last: it is the commit marker. a chunk that vanishes under us (old one
+            // dropped by the last reader) is simply not part of the snapshot
+            let mut done = Vec::new();
+            let mut bytes = (0u64, 0u64);
+            let mut gone = false;
+            for ext in ["ts", "val", "meta"] {
+                let src = meta.with_extension(ext);
+                let dst = out.join(src.file_name().unwrap());
+                match snapshot::link_or_copy(&src, &dst) {
+                    Ok(linked) => {
+                        let n = fs::metadata(&dst)?.len();
+                        if linked { bytes.0 += n } else { bytes.1 += n }
+                        done.push(dst);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        gone = true;
+                        break;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            if gone {
+                for d in done {
+                    let _ = fs::remove_file(d);
+                }
+                continue;
+            }
+            info.chunks += 1;
+            info.linked_bytes += bytes.0;
+            info.copied_bytes += bytes.1;
+        }
+
+        // wal before catalog: every series a copied record refers to is already in the
+        // catalog by then (series_for appends it before the first record is logged)
+        for (i, w) in self.wal.iter().enumerate() {
+            let g = w.lock().unwrap();
+            let name = format!("wal-{i}.log");
+            info.copied_bytes += fs::copy(self.cfg.dir.join(&name), dest.join(&name))?;
+            drop(g);
+        }
+        let g = self.cat_file.lock().unwrap();
+        info.copied_bytes += fs::copy(self.cfg.dir.join("series.cat"), dest.join("series.cat"))?;
+        drop(g);
+        Ok(info)
     }
 
     // caller holds `maintenance`.

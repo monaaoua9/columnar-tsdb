@@ -16,6 +16,7 @@ pub mod funcs;
 pub mod lineproto;
 pub mod query;
 pub mod sketch;
+pub mod snapshot;
 
 pub mod compress;
 pub mod config;
