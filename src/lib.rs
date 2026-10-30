@@ -14,9 +14,11 @@ mod series;
 mod wal;
 
 pub mod funcs;
+mod json;
 pub mod lineproto;
 pub mod query;
 pub mod sketch;
+pub mod server;
 pub mod snapshot;
 
 pub mod compress;

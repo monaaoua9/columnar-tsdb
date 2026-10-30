@@ -1,0 +1,123 @@
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use columnar_tsdb::server::Server;
+use columnar_tsdb::{Config, Engine};
+
+fn setup(tag: &str) -> (Engine, Server, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("ctsdb-http-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut c = Config::new(&dir);
+    c.maintenance_interval = Duration::from_millis(20);
+    let e = Engine::open(c).unwrap();
+    let s = Server::start(e.clone(), "127.0.0.1:0").unwrap();
+    (e, s, dir)
+}
+
+// returns (status, body)
+fn http(srv: &Server, raw: &str) -> (u16, String) {
+    let mut c = TcpStream::connect(srv.addr()).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(raw.as_bytes()).unwrap();
+    let mut out = String::new();
+    c.read_to_string(&mut out).unwrap();
+    let status = out.split(' ').nth(1).unwrap().parse().unwrap();
+    let body = out.split_once("\r\n\r\n").map_or("", |x| x.1).to_string();
+    (status, body)
+}
+
+fn get(srv: &Server, path: &str) -> (u16, String) {
+    http(srv, &format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n"))
+}
+
+fn post(srv: &Server, path: &str, body: &str) -> (u16, String) {
+    http(srv, &format!("POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}", body.len()))
+}
+
+#[test]
+fn write_then_query() {
+    let (e, srv, dir) = setup("wq");
+    assert_eq!(get(&srv, "/health"), (200, "ok\n".into()));
+
+    let lines = "cpu,host=a value=1 1000\ncpu,host=a value=3 2000\ncpu,host=b value=10 1500\n";
+    assert_eq!(post(&srv, "/write", lines).0, 204);
+
+    // instant sum at ts 5000 over everything
+    let (code, body) = get(&srv, "/query?query=sum(cpu)&start=0&end=5000");
+    assert_eq!(code, 200, "{body}");
+    assert!(body.contains("\"type\":\"vector\""), "{body}");
+    assert!(body.contains("[5000,13]"), "{body}");
+
+    // percent-encoded matcher + stepped
+    let q = "avg_over_time(cpu%7Bhost%3D%22a%22%7D)";
+    let (code, body) = get(&srv, &format!("/query?query={q}&start=0&end=3000&step=1s"));
+    assert_eq!(code, 200, "{body}");
+    assert!(body.contains("[1000,1]") && body.contains("[2000,3]"), "{body}");
+    assert!(body.contains("\"step\":1000"), "{body}");
+
+    assert_eq!(e.query_range(&columnar_tsdb::SeriesKey::new("cpu").label("host", "a"), 0, 9999).unwrap().len(), 2);
+    srv.shutdown();
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn write_without_ts_uses_default() {
+    let (e, srv, dir) = setup("dts");
+    assert_eq!(post(&srv, "/write?ts=777", "m v=1\nm2 v=2 5").0, 204);
+    let m = columnar_tsdb::SeriesKey::new("m");
+    assert_eq!(e.query_range(&m, 777, 778).unwrap().len(), 1);
+    srv.shutdown();
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn errors_use_the_error_envelope() {
+    let (e, srv, dir) = setup("err");
+    let (c, b) = post(&srv, "/write", "good v=1 1\nbad line here\n");
+    assert_eq!(c, 400);
+    assert!(b.contains("\"code\":\"BAD_LINE\"") && b.contains("line 2"), "{b}");
+    // all-or-nothing: the good line before the bad one was not written
+    assert!(e.select(&columnar_tsdb::Selector::new("good")).is_empty());
+
+    let (c, b) = get(&srv, "/query?query=rate(");
+    assert_eq!(c, 400);
+    assert!(b.contains("BAD_QUERY"), "{b}");
+    assert_eq!(get(&srv, "/query").0, 400);
+    assert_eq!(get(&srv, "/query?query=x&end=nope").0, 400);
+    assert_eq!(get(&srv, "/nothing").0, 404);
+    assert_eq!(post(&srv, "/health", "").0, 405);
+    assert_eq!(http(&srv, "garbage\r\n\r\n").0, 400);
+
+    srv.shutdown();
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn metrics_endpoint_and_oversize_body() {
+    let (e, srv, dir) = setup("met");
+    post(&srv, "/write", "m v=1 1\n");
+    let (c, b) = get(&srv, "/metrics");
+    assert_eq!(c, 200);
+    assert!(b.contains("tsdb_points_appended_total 1\n"), "{b}");
+
+    let big = format!("POST /write HTTP/1.1\r\nContent-Length: {}\r\n\r\n", 9 << 20);
+    assert_eq!(http(&srv, &big).0, 413);
+    srv.shutdown();
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn shutdown_releases_the_port() {
+    let (e, srv, dir) = setup("down");
+    let addr = srv.addr();
+    srv.shutdown();
+    assert!(TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err());
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}
