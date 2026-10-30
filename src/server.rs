@@ -351,6 +351,28 @@ fn route(engine: &Engine, req: &Req) -> (u16, &'static str, Vec<u8>) {
                 Err(e) => fail(500, "INTERNAL", &e.to_string()),
             }
         }
+        ("POST", "/delete") => {
+            // start and end are mandatory: a forgotten parameter must not mean "everything"
+            let (Some(m), Some(st), Some(en)) =
+                (req.param("match"), req.param("start"), req.param("end"))
+            else {
+                return fail(400, "MISSING_PARAM", "match, start and end are required");
+            };
+            let now = now_ms();
+            let run = || -> Result<u64> {
+                let sel = query::parse_selector(m)?;
+                engine.delete_select(&sel, parse_time(st, now)?, parse_time(en, now)?)
+            };
+            match run() {
+                Ok(n) => (
+                    200,
+                    JSON,
+                    format!("{{\"data\":{{\"deleted\":{n}}}}}").into_bytes(),
+                ),
+                Err(Error::Query(m)) => fail(400, "BAD_QUERY", &m),
+                Err(e) => fail(500, "INTERNAL", &e.to_string()),
+            }
+        }
         ("GET", "/query") => {
             let now = now_ms();
             let Some(q) = req.param("query") else {
@@ -386,7 +408,7 @@ fn route(engine: &Engine, req: &Req) -> (u16, &'static str, Vec<u8>) {
                 Err(e) => fail(500, "INTERNAL", &e.to_string()),
             }
         }
-        (_, "/health" | "/metrics" | "/write" | "/query") => {
+        (_, "/health" | "/metrics" | "/write" | "/query" | "/delete") => {
             fail(405, "METHOD_NOT_ALLOWED", "wrong method")
         }
         _ => fail(404, "NOT_FOUND", "no such route"),

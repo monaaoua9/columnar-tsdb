@@ -236,3 +236,52 @@ fn rejection_carries_a_challenge_header() {
     drop(e);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn delete_over_http() {
+    let (e, srv, dir) = setup("del");
+    let mut lines = String::new();
+    for i in 0..10 {
+        lines.push_str(&format!("m,host=a value={i} {}\n", i * 1000));
+        lines.push_str(&format!("m,host=b value={i} {}\n", i * 1000));
+    }
+    assert_eq!(post(&srv, "/write", &lines).0, 204);
+
+    // all three parameters are required
+    for q in ["", "?match=m", "?match=m&start=0", "?start=0&end=1000"] {
+        let (c, b) = post(&srv, &format!("/delete{q}"), "");
+        assert_eq!(c, 400, "{q}: {b}");
+        assert!(b.contains("MISSING_PARAM"), "{b}");
+    }
+    assert_eq!(e.list_series().len(), 2);
+    assert_eq!(
+        e.query_range(
+            &columnar_tsdb::SeriesKey::new("m").label("host", "a"),
+            0,
+            99_999
+        )
+        .unwrap()
+        .len(),
+        10
+    );
+
+    // only host=a, [2000, 5000)
+    let q = "/delete?match=m%7Bhost%3D%22a%22%7D&start=2000&end=5000";
+    let (c, b) = post(&srv, q, "");
+    assert_eq!(c, 200, "{b}");
+    assert!(b.contains("\"deleted\":3"), "{b}");
+    let a = columnar_tsdb::SeriesKey::new("m").label("host", "a");
+    let bk = columnar_tsdb::SeriesKey::new("m").label("host", "b");
+    assert_eq!(e.query_range(&a, 0, 99_999).unwrap().len(), 7);
+    assert_eq!(e.query_range(&bk, 0, 99_999).unwrap().len(), 10);
+
+    // selectors only: no functions, ranges or garbage
+    for bad in ["rate(m[1m])", "m[5m]", "m%20offset%205m", "m%7B", "1%2B1"] {
+        let (c, _) = post(&srv, &format!("/delete?match={bad}&start=0&end=1"), "");
+        assert_eq!(c, 400, "{bad}");
+    }
+    assert_eq!(get(&srv, "/delete").0, 405);
+    srv.shutdown();
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}

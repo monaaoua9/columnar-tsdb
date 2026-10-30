@@ -172,3 +172,49 @@ fn serve_requires_the_token_when_given() {
     child.wait().unwrap();
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn delete_command() {
+    let d = tmp("delete");
+    let ds = d.to_str().unwrap();
+    let mut input = String::new();
+    for i in 0..20 {
+        input.push_str(&format!("m,host=a value={i} {}\n", i * 1000));
+        input.push_str(&format!("m,host=b value={i} {}\n", i * 1000));
+    }
+    assert!(tsdb(&["import", ds, "-"], Some(&input)).status.success());
+
+    // bounds are mandatory
+    for args in [
+        vec!["delete", ds, "m"],
+        vec!["delete", ds, "m", "--start", "0"],
+        vec!["delete", ds, "--start", "0", "--end", "1"],
+        vec!["delete", ds, "rate(m[1m])", "--start", "0", "--end", "1"],
+    ] {
+        let o = tsdb(&args, None);
+        assert!(!o.status.success(), "{args:?} should fail");
+    }
+    assert_eq!(text(&tsdb(&["export", ds], None)).lines().count(), 40);
+
+    let o = tsdb(
+        &[
+            "delete",
+            ds,
+            "m{host=\"b\"}",
+            "--start",
+            "5000",
+            "--end",
+            "15000",
+        ],
+        None,
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(text(&o).contains("deleted 10 points"), "{}", text(&o));
+
+    let out = text(&tsdb(&["export", ds], None));
+    assert_eq!(out.lines().count(), 30);
+    assert_eq!(out.lines().filter(|l| l.contains("host=a")).count(), 20);
+    // and it is still gone after another open
+    assert_eq!(text(&tsdb(&["export", ds, "m"], None)).lines().count(), 30);
+    let _ = std::fs::remove_dir_all(d);
+}

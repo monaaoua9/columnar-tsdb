@@ -193,13 +193,14 @@ proxy in front of it if it is reachable from anywhere but localhost.
 GET  /health
 GET  /metrics                                         prometheus text
 POST /write[?ts=now-5m]                               line protocol body -> 204
+POST /delete?match=cpu{host="a"}&start=T&end=T          delete [start, end); all three required
 GET  /query?query=...&start=now-1h&end=now&step=30s   -> {"data":{..},"meta":{..}}
 ```
 
 Errors come back as `{"error":{"code":"BAD_QUERY","message":"..."}}`. With a token configured every route except `/health` answers 401 without `Authorization: Bearer <token>`.
 
 `cargo run --bin tsdb -- <command> <dir>`: `import`, `export`, `query`, `series`, `stats`,
-`compact`, `snapshot`, `serve`.
+`compact`, `snapshot`, `delete` (needs `--start` and `--end`), `serve`.
 
 ## Snapshots, rollups, metrics
 

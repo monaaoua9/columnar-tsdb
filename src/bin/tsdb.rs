@@ -15,6 +15,7 @@ usage: tsdb <command> <data-dir> [args]
   export   <dir> [metric]            dump points as line protocol
   query    <dir> <expr> [--start T] [--end T] [--step D]
   series   <dir>                     list series
+  delete   <dir> <selector> --start T --end T   remove points in [start, end)
   stats    <dir>                     sizes and counters
   compact  <dir>                     merge every bucket
   snapshot <dir> <dest>              online copy into an empty dir
@@ -135,6 +136,23 @@ fn run(args: &[String]) -> Result<(), String> {
             let eng = open(dir).map_err(e)?;
             let v = query::run(&eng, expr, &ctx).map_err(e)?;
             print_value(&v, &mut out).map_err(io_err)?;
+        }
+        "delete" => {
+            let Some(text) = rest.first() else {
+                return Err("delete needs a selector like cpu{host=\"a\"}".into());
+            };
+            let fl = flags(&rest[1..], &["--start", "--end"])?;
+            let get = |n: &str| fl.iter().find(|f| f.0 == n).map(|f| f.1);
+            // both bounds are mandatory so a typo can't turn into "delete everything"
+            let (Some(st), Some(en)) = (get("--start"), get("--end")) else {
+                return Err("delete needs --start and --end".into());
+            };
+            let now = now_ms();
+            let sel = query::parse_selector(text).map_err(e)?;
+            let (st, en) = (time_arg(st, now).map_err(e)?, time_arg(en, now).map_err(e)?);
+            let eng = open(dir).map_err(e)?;
+            let n = eng.delete_select(&sel, st, en).map_err(e)?;
+            writeln!(out, "deleted {n} points").map_err(io_err)?;
         }
         "series" => {
             let eng = open(dir).map_err(e)?;

@@ -19,9 +19,43 @@ pub use eval::{eval, Ctx, Row, Value};
 pub use parse::{parse, parse_duration, AggOp, BinOp, Expr};
 
 use crate::engine::Engine;
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::model::Selector;
+
+// `cpu{host="a", dc=~"fra|ams"}` on its own, no range / offset / function around it
+pub fn parse_selector(text: &str) -> Result<Selector> {
+    match parse(text)? {
+        Expr::Select(sel, None) => Ok(sel),
+        _ => Err(Error::Query(format!(
+            "expected a plain selector like name{{label=\"x\"}}, got {text:?}"
+        ))),
+    }
+}
 
 pub fn run(engine: &Engine, text: &str, ctx: &Ctx) -> Result<Value> {
     let e = parse(text)?;
     eval(engine, &e, ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_selectors_only() {
+        let s = parse_selector(r#"cpu{host="a", dc=~"fra|ams"}"#).unwrap();
+        assert_eq!(s, Selector::new("cpu").eq("host", "a").re("dc", "fra|ams"));
+        assert_eq!(parse_selector("cpu").unwrap(), Selector::new("cpu"));
+        for bad in [
+            "cpu[5m]",
+            "rate(cpu[1m])",
+            "cpu offset 1m",
+            "sum(cpu)",
+            "1",
+            "cpu +",
+            "",
+        ] {
+            assert!(parse_selector(bad).is_err(), "{bad:?}");
+        }
+    }
 }
