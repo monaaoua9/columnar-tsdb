@@ -145,6 +145,11 @@ impl Engine {
             .collect()
     }
 
+    // (oldest ts, newest ts) the series currently holds, None if it has no points
+    pub fn bounds(&self, key: &SeriesKey) -> Option<(i64, i64)> {
+        self.inner.find(key)?.state.read().unwrap().bounds()
+    }
+
     // every series in the catalog, ordered by id
     pub fn list_series(&self) -> Vec<SeriesKey> {
         self.inner.series_list().iter().map(|s| s.key.clone()).collect()

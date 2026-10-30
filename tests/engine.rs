@@ -752,3 +752,21 @@ fn list_series_and_names() {
     drop(e);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn bounds_cover_memory_disk_and_late_points() {
+    let dir = tmp("bounds");
+    let e = Engine::open(cfg(&dir)).unwrap();
+    let k = key();
+    assert_eq!(e.bounds(&k), None);
+    for i in 10..300 {
+        e.append(&k, i * 10, 1.0).unwrap();
+    }
+    assert_eq!(e.bounds(&k), Some((100, 2990)));
+    e.flush().unwrap();
+    assert_eq!(e.bounds(&k), Some((100, 2990)));
+    e.append(&k, 3, 1.0).unwrap(); // late and older than everything
+    assert_eq!(e.bounds(&k), Some((3, 2990)));
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}
