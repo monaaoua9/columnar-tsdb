@@ -1,7 +1,7 @@
 //! A small PromQL-flavoured query language on top of the engine.
 //!
 //! ```text
-//! cpu{dc="fra", host!="web-9", rack=~"r-*"}          last value per series
+//! cpu{dc="fra", host!="web-9", rack=~"r-(1|2)"}      last value per series (=~ regex, !~ not, =* glob)
 //! rate(reqs[1m])                                     per-second counter rate
 //! avg_over_time(cpu[5m])                             also sum/min/max/count/first/last/stddev
 //! quantile_over_time(0.99, latency[5m])              p50 p90 p95 p99 shortcuts exist too

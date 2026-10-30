@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use crate::funcs::Func;
 use crate::model::{Matcher, Selector};
+use crate::regex::Regex;
 
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
@@ -19,6 +20,8 @@ enum Tok {
     Eq,
     Ne,
     Glob,
+    Re,
+    NotRe,
     Plus,
     Minus,
     Star,
@@ -118,7 +121,15 @@ fn lex(src: &str) -> Result<Vec<(Tok, usize)>> {
             '/' => Tok::Slash,
             '=' if two('~') => {
                 i += 1;
+                Tok::Re
+            }
+            '=' if two('*') => {
+                i += 1;
                 Tok::Glob
+            }
+            '!' if two('~') => {
+                i += 1;
+                Tok::NotRe
             }
             '=' if two('=') => {
                 i += 1;
@@ -473,7 +484,17 @@ impl Parser {
                     Some(Tok::Eq) => Matcher::Eq(k, v),
                     Some(Tok::Ne) => Matcher::Ne(k, v),
                     Some(Tok::Glob) => Matcher::Like(k, v),
-                    _ => return err(format!("expected =, != or =~ at {at}")),
+                    Some(t @ (Tok::Re | Tok::NotRe)) => {
+                        if let Err(Error::Query(m)) = Regex::new(&v) {
+                            return err(format!("{m} (in matcher at {vat})"));
+                        }
+                        if t == Tok::Re {
+                            Matcher::Regex(k, v)
+                        } else {
+                            Matcher::NotRegex(k, v)
+                        }
+                    }
+                    _ => return err(format!("expected =, !=, =~, !~ or =* at {at}")),
                 });
                 if !self.eat(&Tok::Comma) {
                     self.expect(Tok::RBrace)?;
@@ -515,11 +536,14 @@ mod tests {
 
     #[test]
     fn selector_with_matchers_and_range() {
-        let e = parse(r#"cpu{dc="fra", host!="web-9", rack=~"r-*",}[5m]"#).unwrap();
+        let e =
+            parse(r#"cpu{dc="fra", host!="web-9", rack=*"r-*", n=~"a|b", m!~"x.*",}[5m]"#).unwrap();
         let want = sel("cpu")
             .eq("dc", "fra")
             .ne("host", "web-9")
-            .like("rack", "r-*");
+            .like("rack", "r-*")
+            .re("n", "a|b")
+            .not_re("m", "x.*");
         assert_eq!(e, Expr::Select(want, Some(300_000)));
     }
 

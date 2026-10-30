@@ -2,6 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use crate::model::{glob_match, Matcher, Selector, SeriesId, SeriesKey};
+use crate::regex::Regex;
 
 // Inverted index: metric name -> series ids, and (label, value) -> series ids. Every list
 // stays sorted so selectors resolve with merge-style intersect / subtract.
@@ -57,6 +58,19 @@ impl LabelIndex {
         }
     }
 
+    // ids of series whose value for `label` passes `ok`, sorted
+    fn matching(&self, label: &str, ok: impl Fn(&str) -> bool) -> Vec<SeriesId> {
+        let mut hits: Vec<SeriesId> = Vec::new();
+        for v in self.values.get(label).into_iter().flatten() {
+            if ok(v) {
+                hits.extend_from_slice(&self.postings[&(label.to_string(), v.clone())]);
+            }
+        }
+        hits.sort_unstable();
+        hits.dedup();
+        hits
+    }
+
     pub fn resolve(&self, sel: &Selector) -> Vec<SeriesId> {
         let Some(base) = self.by_name.get(&sel.name) else {
             return Vec::new();
@@ -74,15 +88,22 @@ impl LabelIndex {
                     }
                 }
                 Matcher::Like(k, pat) => {
-                    let mut hits: Vec<SeriesId> = Vec::new();
-                    for v in self.values.get(k).into_iter().flatten() {
-                        if glob_match(pat, v) {
-                            hits.extend_from_slice(&self.postings[&(k.clone(), v.clone())]);
-                        }
-                    }
-                    hits.sort_unstable();
-                    hits.dedup();
+                    let hits = self.matching(k, |v| glob_match(pat, v));
                     ids = intersect(&ids, &hits);
+                }
+                Matcher::Regex(k, pat) => {
+                    let Ok(re) = Regex::new(pat) else {
+                        return Vec::new();
+                    };
+                    let hits = self.matching(k, |v| re.is_match(v));
+                    ids = intersect(&ids, &hits);
+                }
+                Matcher::NotRegex(k, pat) => {
+                    let Ok(re) = Regex::new(pat) else {
+                        return Vec::new();
+                    };
+                    let hits = self.matching(k, |v| re.is_match(v));
+                    ids = subtract(&ids, &hits);
                 }
             }
             if ids.is_empty() {
@@ -152,6 +173,12 @@ mod tests {
             Selector::new("cpu").like("host", "h?"),
             Selector::new("cpu").like("host", "h1*").ne("dc", "ams"),
             Selector::new("cpu").like("role", "*"),
+            Selector::new("cpu").re("host", "h[1-3]"),
+            Selector::new("cpu").re("host", "h1|h5").eq("dc", "ams"),
+            Selector::new("cpu").not_re("host", "h[0-4]"),
+            Selector::new("cpu").not_re("role", ".+"),
+            Selector::new("cpu").re("role", "(db"),
+            Selector::new("cpu").not_re("role", "(db"),
             Selector::new("cpu").like("nope", "*"),
             Selector::new("cpu").eq("nope", "x"),
             Selector::new("missing"),

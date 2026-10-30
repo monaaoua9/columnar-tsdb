@@ -131,8 +131,11 @@ passes `ne`), so resolving a selector never scans the catalog.
   grouped under `""`).
 
 `like(label, "web-*")` is a glob matcher (`*` any run, `?` one character) that walks
-only the distinct values of that label. There is no full regex: the crate has no
-dependencies and that is worth more than a regex engine here.
+only the distinct values of that label. `re(label, "web-(1|2)")` / `not_re` take a regex
+from the crate's own engine (`regex.rs`): whole-value match, classes, groups, `|`, `* + ?
+{n,m}`, `\d \w \s`; no backreferences or lookaround. It is an NFA simulation, so matching
+is linear in the input and a hostile pattern can't blow up. A pattern that doesn't compile
+selects nothing (the query language rejects it at parse time).
 
 The index is memory-only and rebuilt from the series catalog on open.
 
@@ -150,7 +153,7 @@ their stats.
 ms (`5m` = 300000), so timestamps are assumed to be ms.
 
 ```
-cpu{dc="fra", host!="web-9", rack=~"r-*"}      last value per series (=~ is a glob, not a regex)
+cpu{dc="fra", host!="web-9", rack=~"r-(1|2)"}  last value per series (=~ regex, !~ negated, =* glob)
 rate(reqs[1m])                                 per-second counter rate, resets handled
 avg_over_time(cpu[5m])                         sum/min/max/count/first/last/stddev/stdvar too
 quantile_over_time(0.99, latency[5m])          p50 p90 p95 p99 shortcuts exist as well
@@ -327,7 +330,7 @@ Backpressure: appends to a series block once it has more than
 - No fsync of the chunk directory after renames.
 - No delete API. Data leaves through `retention` only: a delete needs a tombstone record in
   the WAL and catalog, and getting that wrong loses data, so it is not here.
-- Query language: no regex matcher (glob only), no subqueries, no `offset`, no joins on
+- Query language: no subqueries, no `offset`, no joins on
   different label sets. `rate` extrapolates nothing, it is `increase / (last_ts - first_ts)`.
 - The HTTP server has no auth and no TLS.
 - Snapshot holds the maintenance lock while it links files, and std mutexes aren't fair: under a

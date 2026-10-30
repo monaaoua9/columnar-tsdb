@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::regex::Regex;
+
 pub type SeriesId = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,6 +71,11 @@ pub enum Matcher {
     Ne(String, String),
     // label present and its value matches the glob (`*` any run, `?` one char)
     Like(String, String),
+    // label present and its whole value matches the regex (see crate::regex). A pattern that
+    // doesn't compile matches nothing
+    Regex(String, String),
+    // label absent, or present and not matching the regex
+    NotRegex(String, String),
 }
 
 // iterative glob with single-star backtracking; no recursion, no allocation beyond the char vecs
@@ -130,6 +137,17 @@ impl Selector {
         self
     }
 
+    pub fn re(mut self, k: impl Into<String>, pattern: impl Into<String>) -> Self {
+        self.matchers.push(Matcher::Regex(k.into(), pattern.into()));
+        self
+    }
+
+    pub fn not_re(mut self, k: impl Into<String>, pattern: impl Into<String>) -> Self {
+        self.matchers
+            .push(Matcher::NotRegex(k.into(), pattern.into()));
+        self
+    }
+
     // slow reference check; the engine resolves selectors through the label index instead
     pub fn matches(&self, key: &SeriesKey) -> bool {
         key.name() == self.name
@@ -137,6 +155,16 @@ impl Selector {
                 Matcher::Eq(k, v) => key.labels().get(k) == Some(v),
                 Matcher::Ne(k, v) => key.labels().get(k) != Some(v),
                 Matcher::Like(k, pat) => key.labels().get(k).is_some_and(|v| glob_match(pat, v)),
+                Matcher::Regex(k, pat) => match Regex::new(pat) {
+                    Ok(re) => key.labels().get(k).is_some_and(|v| re.is_match(v)),
+                    Err(_) => false,
+                },
+                Matcher::NotRegex(k, pat) => match Regex::new(pat) {
+                    Ok(re) => !key.labels().get(k).is_some_and(|v| re.is_match(v)),
+                    // same as Regex above: a broken pattern selects nothing, so "not" of
+                    // nothing-matching would select everything; refuse instead
+                    Err(_) => false,
+                },
             })
     }
 }

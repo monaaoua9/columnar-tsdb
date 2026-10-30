@@ -77,11 +77,18 @@ fn aggregation_grouping_and_filters() {
     assert!((by_dc[0].1[0].1 - 0.3).abs() < 1e-9);
     assert!((by_dc[1].1[0].1 - 0.3).abs() < 1e-9); // fra: 0.1 + 0.2
 
-    let only = vector(query::run(&e, r#"load{host=~"web-[12]"}"#, &ctx).unwrap());
-    // glob has no character classes, so nothing matches
-    assert!(only.is_empty());
-    let like = vector(query::run(&e, r#"load{host=~"web-?", host!="web-2"}"#, &ctx).unwrap());
-    assert_eq!(like.len(), 2);
+    // =~ is a real regex now (whole-value match), =* is the old glob
+    let re = vector(query::run(&e, r#"load{host=~"web-[12]"}"#, &ctx).unwrap());
+    assert_eq!(re.len(), 2);
+    let alt = vector(query::run(&e, r#"load{host=~"web-1|web-3"}"#, &ctx).unwrap());
+    assert_eq!(alt.len(), 2);
+    let partial = vector(query::run(&e, r#"load{host=~"web"}"#, &ctx).unwrap());
+    assert!(partial.is_empty(), "regex must match the whole value");
+    let not_re = vector(query::run(&e, r#"load{host!~"web-[12]"}"#, &ctx).unwrap());
+    assert_eq!(not_re.len(), 1);
+    let glob = vector(query::run(&e, r#"load{host=*"web-?", host!="web-2"}"#, &ctx).unwrap());
+    assert_eq!(glob.len(), 2);
+    assert!(query::run(&e, r#"load{host=~"(web"}"#, &ctx).is_err());
 
     let big = vector(query::run(&e, "load > 15", &ctx).unwrap());
     assert_eq!(big.len(), 2);
