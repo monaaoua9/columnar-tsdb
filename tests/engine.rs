@@ -733,3 +733,22 @@ fn metrics_follow_activity() {
     drop(e);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn list_series_and_names() {
+    let dir = tmp("list");
+    let e = Engine::open(cfg(&dir)).unwrap();
+    assert!(e.list_series().is_empty());
+    for (n, h) in [("cpu", "a"), ("cpu", "b"), ("mem", "a")] {
+        e.append(&SeriesKey::new(n).label("host", h), 1, 1.0).unwrap();
+    }
+    assert_eq!(e.list_series().len(), 3);
+    assert_eq!(e.metric_names(), vec!["cpu", "mem"]);
+    drop(e);
+
+    // survives a reopen (comes from the catalog)
+    let e = Engine::open(cfg(&dir)).unwrap();
+    assert_eq!(e.metric_names(), vec!["cpu", "mem"]);
+    drop(e);
+    let _ = std::fs::remove_dir_all(dir);
+}

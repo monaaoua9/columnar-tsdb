@@ -145,6 +145,19 @@ impl Engine {
             .collect()
     }
 
+    // every series in the catalog, ordered by id
+    pub fn list_series(&self) -> Vec<SeriesKey> {
+        self.inner.series_list().iter().map(|s| s.key.clone()).collect()
+    }
+
+    // distinct metric names, sorted
+    pub fn metric_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.list_series().iter().map(|k| k.name().to_string()).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
     // raw points of every matching series; series with nothing in range are left out
     pub fn query_select(
         &self,
