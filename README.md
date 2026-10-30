@@ -68,9 +68,19 @@ src/
   wal.rs, catalog.rs  write-ahead log (sharded), series catalog (both crc'd, torn-tail safe)
   bin/crash_writer.rs helper process for the hard-kill test
   engine.rs           public API, background worker, flush, compaction, retention
+  funcs.rs            rate / increase / quantile / stddev / moving averages over points
+  sketch.rs           DDSketch, mergeable quantile estimates with a relative error bound
+  lineproto.rs        influx-style line protocol parser + bulk ingest
+  query/              PromQL-flavoured language: lexer + parser (parse.rs), evaluator (eval.rs)
+  rollup.rs           incremental downsampling into ordinary series
+  snapshot.rs         restore + helpers for Engine::snapshot (hard-linked online copy)
+  metrics.rs          counters + prometheus text
+  server.rs, json.rs  std-only http front end
+  bin/tsdb.rs         command line tool
 tests/engine.rs       end-to-end: recovery, compaction, late writes, labels, concurrency,
                       randomized comparison against a BTreeMap model
 tests/crash.rs        kills a writer process mid-flight, reopens, verifies
+tests/query.rs, http.rs, cli.rs, snapshot.rs, rollup.rs, props.rs   one per feature; props is randomized
 examples/             ingest_bench.rs, concurrent_bench.rs
 ```
 
@@ -133,6 +143,78 @@ series) returns one aggregate per `step`-wide window, aligned to `start`, empty
 windows omitted. Windows are clamped to the span the series actually holds, so
 `i64::MIN..i64::MAX` is fine, and any window that covers whole chunks is answered from
 their stats.
+
+## Query language
+
+`query::run(&engine, text, &Ctx)` evaluates a small PromQL-like language. Durations are in
+ms (`5m` = 300000), so timestamps are assumed to be ms.
+
+```
+cpu{dc="fra", host!="web-9", rack=~"r-*"}      last value per series (=~ is a glob, not a regex)
+rate(reqs[1m])                                 per-second counter rate, resets handled
+avg_over_time(cpu[5m])                         sum/min/max/count/first/last/stddev/stdvar too
+quantile_over_time(0.99, latency[5m])          p50 p90 p95 p99 shortcuts exist as well
+sum(rate(reqs[1m])) by (host)                  across-series sum/avg/min/max/count
+topk(5, max_over_time(cpu[1h]))                bottomk too
+rate(reqs[1m]) * 60 > 100                      scalar arithmetic; comparisons filter
+sum(rate(a[1m])) by (host) / sum(b) by (host)  vector ops match on identical labels
+```
+
+`Ctx::instant(start, end)` gives one point per series (at `end`); `Ctx::stepped(start, end,
+step)` gives one per window. Without a `[range]` a stepped query uses tumbling windows; with
+one, each step looks back that far. At most 100k steps per query. Parse errors carry the
+character offset.
+
+`funcs` has the same reductions as plain functions over `&[Point]`. `sketch::Sketch` is a
+DDSketch (you pick alpha, 0.01 = 1% relative error): constant memory, merge across chunks or hosts, and
+`to_bytes` / `from_bytes` to store it.
+
+## Ingest, server, CLI
+
+Line protocol, one f64 per line, `\` escapes for `, = space` in names:
+
+```
+cpu_usage,host=web-1,dc=fra value=41.5 1700000000000
+cpu_usage,host=web-1 41.5            # no timestamp: caller's default (now over http)
+```
+
+`lineproto::ingest(&engine, text, default_ts)` parses everything first (a bad line writes
+nothing, the error names the line) and appends one batch per series.
+
+`server::Server::start(engine, "127.0.0.1:8086")` is a plain `std::net` HTTP/1.1 server,
+thread per connection, 64 connections max, 8 MiB body max, no TLS and no keep-alive. Put a
+proxy in front of it if it is reachable from anywhere but localhost.
+
+```
+GET  /health
+GET  /metrics                                         prometheus text
+POST /write[?ts=now-5m]                               line protocol body -> 204
+GET  /query?query=...&start=now-1h&end=now&step=30s   -> {"data":{..},"meta":{..}}
+```
+
+Errors come back as `{"error":{"code":"BAD_QUERY","message":"..."}}`.
+
+`cargo run --bin tsdb -- <command> <dir>`: `import`, `export`, `query`, `series`, `stats`,
+`compact`, `snapshot`, `serve`.
+
+## Snapshots, rollups, metrics
+
+`engine.snapshot(dest)` copies a live database into an empty directory. Sealed chunks are
+hard-linked (they never change after their tmp+rename), the WAL and catalog are copied under
+their locks, WAL first so every series a copied record names is in the copied catalog.
+Writers keep going; no flush is forced, opening the copy replays the WAL. While it runs the
+maintenance thread waits (chunk set must not change). `snapshot::restore(src, dst)` makes an
+independent real copy; it refuses a directory that has a `LOCK` file (a live one).
+
+`rollup::Rollup::new(selector, step).run(&engine, upto)` writes `name:5m:avg`, `:min`,
+`:max`, `:sum`, `:count` series (same labels) for every complete window before `upto`. It
+resumes from the newest rolled window, recomputes that one every run (so late points land and
+re-running is harmless), and the results are ordinary series: query them, keep them past
+`retention`.
+
+`engine.metrics()` returns counters (appends, late points, chunks sealed, merges,
+compactions, expired chunks, queries, maintenance errors, ...); `render_metrics()` adds the
+`stats()` gauges in prometheus text format.
 
 ## Concurrency model
 
@@ -243,6 +325,13 @@ Backpressure: appends to a series block once it has more than
   that was in flight may survive as a prefix. Acknowledged batches are never lost.
 - Sum is a plain f64 accumulation.
 - No fsync of the chunk directory after renames.
+- No delete API. Data leaves through `retention` only: a delete needs a tombstone record in
+  the WAL and catalog, and getting that wrong loses data, so it is not here.
+- Query language: no regex matcher (glob only), no subqueries, no `offset`, no joins on
+  different label sets. `rate` extrapolates nothing, it is `increase / (last_ts - first_ts)`.
+- The HTTP server has no auth and no TLS.
+- Snapshot holds the maintenance lock while it links files, and std mutexes aren't fair: under a
+  writer that outruns the sealer it can wait a long time for its turn.
 
 ## Development
 
