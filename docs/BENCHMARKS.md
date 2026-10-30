@@ -61,6 +61,24 @@ Criterion, 100,000 points, one run (its interval is the spread):
 | gorilla encode / decode | 8.9 / 16.3 M pts/s |
 | `engine/append_batch` (WAL + active chunk) | 2.67 M pts/s |
 
+## Queries, regex, delete
+
+```
+cargo run --release --example query_bench
+```
+
+100 series x 100,000 points (10 s apart, about 11 days), flushed to disk. One run, same laptop:
+
+| | time |
+|---|---:|
+| ingest 10 M points + flush | 8.0 s |
+| instant query, one series | 0.04 ms |
+| `sum by (dc) (cpu)`, 2 days @ 10 min | 365 ms |
+| `rate(cpu[5m])`, all series, 2 days @ 10 min | 146 ms |
+| `topk(5, avg_over_time(cpu[1h]))` | 169 ms |
+| `count(cpu{host=~"h0[0-4]."})` | 69 ms |
+| delete one dc (25 series), 1 day: 216,000 points | 65 ms |
+
 ## Limits of these numbers
 
 Single machine, a laptop whose clock speed moves with temperature, three runs per row. This file compares columnar-tsdb with no other engine.
