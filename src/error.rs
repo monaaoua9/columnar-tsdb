@@ -9,6 +9,8 @@ pub enum Error {
     TooOld { cutoff: i64, got: i64 },
     BadValue(f64),
     BadConfig(&'static str),
+    // parse / eval problem in a query string; the message says where
+    Query(String),
     Locked,
 }
 
@@ -30,6 +32,7 @@ impl fmt::Display for Error {
             }
             Error::BadValue(v) => write!(f, "non-finite value rejected: {v}"),
             Error::BadConfig(m) => write!(f, "bad config: {m}"),
+            Error::Query(m) => write!(f, "query: {m}"),
             Error::Locked => write!(f, "data directory is locked by another process"),
         }
     }
