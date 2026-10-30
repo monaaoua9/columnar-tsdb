@@ -23,10 +23,8 @@ pub(crate) fn link_or_copy(src: &Path, dst: &Path) -> io::Result<bool> {
 }
 
 pub(crate) fn empty_target(dest: &Path) -> Result<()> {
-    if dest.exists() {
-        if !dest.is_dir() || fs::read_dir(dest)?.next().is_some() {
-            return Err(Error::BadConfig("snapshot target must be an empty directory"));
-        }
+    if dest.exists() && (!dest.is_dir() || fs::read_dir(dest)?.next().is_some()) {
+        return Err(Error::BadConfig("snapshot target must be an empty directory"));
     }
     fs::create_dir_all(dest)?;
     Ok(())
