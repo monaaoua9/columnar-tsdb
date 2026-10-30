@@ -11,6 +11,8 @@ mod crc;
 mod index;
 mod metrics;
 mod series;
+#[cfg(test)]
+mod series_tests;
 mod wal;
 
 pub mod funcs;

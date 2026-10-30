@@ -87,6 +87,17 @@ impl ActiveChunk {
         (&self.ts, &self.vals)
     }
 
+    // copy without the points in [start, end); same id and bucket. may come back empty
+    pub fn without_range(&self, start: i64, end: i64) -> ActiveChunk {
+        let mut out = ActiveChunk::new(self.id, self.bucket);
+        for (&t, &v) in self.ts.iter().zip(&self.vals) {
+            if t < start || t >= end {
+                out.push(Point::new(t, v));
+            }
+        }
+        out
+    }
+
     pub fn collect_range(&self, start: i64, end: i64, out: &mut Vec<Point>) {
         let lo = self.ts.partition_point(|&t| t < start);
         let hi = self.ts.partition_point(|&t| t < end);
@@ -363,6 +374,11 @@ impl SealedChunk {
     }
 
     // files go away when the last Arc (maybe held by a running query) is dropped
+    // the commit-marker file; once it is gone the chunk no longer exists as far as recovery goes
+    pub fn meta_path(&self) -> PathBuf {
+        chunk_path(&self.dir, self.series, self.id, "meta")
+    }
+
     pub fn mark_obsolete(&self) {
         self.obsolete.store(true, Ordering::Release);
     }

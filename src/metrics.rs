@@ -17,6 +17,8 @@ pub(crate) struct Counters {
     pub maintenance_errors: AtomicU64,
     pub queries: AtomicU64,
     pub snapshots: AtomicU64,
+    pub deletes: AtomicU64,
+    pub points_deleted: AtomicU64,
 }
 
 pub(crate) fn inc(c: &AtomicU64, n: u64) {
@@ -36,6 +38,8 @@ pub struct Metrics {
     pub maintenance_errors: u64,
     pub queries: u64,
     pub snapshots: u64,
+    pub deletes: u64,
+    pub points_deleted: u64,
 }
 
 impl Counters {
@@ -53,6 +57,8 @@ impl Counters {
             maintenance_errors: g(&self.maintenance_errors),
             queries: g(&self.queries),
             snapshots: g(&self.snapshots),
+            deletes: g(&self.deletes),
+            points_deleted: g(&self.points_deleted),
         }
     }
 }
@@ -125,6 +131,18 @@ impl Metrics {
             "counter",
             "range / aggregate queries",
             self.queries,
+        );
+        put(
+            "deletes_total",
+            "counter",
+            "delete_range calls",
+            self.deletes,
+        );
+        put(
+            "points_deleted_total",
+            "counter",
+            "points removed by deletes",
+            self.points_deleted,
         );
         put(
             "snapshots_total",

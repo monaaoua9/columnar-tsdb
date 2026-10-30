@@ -158,6 +158,54 @@ impl State {
         Some((lo, hi))
     }
 
+    // Drops every point in [start, end) from the raw in-memory parts (late buffer, frozen and
+    // active chunks) and returns how many went. Sealed chunks are the caller's job: they need IO.
+    // Frozen chunks are immutable, so affected ones are swapped for a filtered copy.
+    pub fn cut_memory(&mut self, start: i64, end: i64) -> u64 {
+        let mut gone = 0u64;
+        let doomed: Vec<i64> = self.ooo.range(start..end).map(|(&t, _)| t).collect();
+        gone += doomed.len() as u64;
+        for t in doomed {
+            self.ooo.remove(&t);
+        }
+
+        let mut kept = Vec::with_capacity(self.frozen.len());
+        for f in self.frozen.drain(..) {
+            if f.len() > 0 && f.stats().overlaps(start, end) {
+                let cut = f.without_range(start, end);
+                gone += (f.len() - cut.len()) as u64;
+                if cut.len() > 0 {
+                    kept.push(Arc::new(cut));
+                }
+            } else {
+                kept.push(f);
+            }
+        }
+        self.frozen = kept;
+
+        if let Some(a) = self.active.take() {
+            if a.len() > 0 && a.stats().overlaps(start, end) {
+                let cut = a.without_range(start, end);
+                gone += (a.len() - cut.len()) as u64;
+                if cut.len() > 0 {
+                    self.active = Some(cut);
+                }
+            } else {
+                self.active = Some(a);
+            }
+        }
+        gone
+    }
+
+    pub fn sealed_overlapping(&self, start: i64, end: i64) -> Vec<Arc<SealedChunk>> {
+        self.sealed
+            .values()
+            .flatten()
+            .filter(|c| c.stats.overlaps(start, end))
+            .cloned()
+            .collect()
+    }
+
     pub fn is_drained(&self) -> bool {
         self.active.is_none() && self.frozen.is_empty() && self.ooo.is_empty()
     }

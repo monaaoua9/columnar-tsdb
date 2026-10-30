@@ -80,7 +80,7 @@ src/
 tests/engine.rs       end-to-end: recovery, compaction, late writes, labels, concurrency,
                       randomized comparison against a BTreeMap model
 tests/crash.rs        kills a writer process mid-flight, reopens, verifies
-tests/query.rs, http.rs, cli.rs, snapshot.rs, rollup.rs, props.rs   one per feature; props is randomized
+tests/query.rs, http.rs, cli.rs, snapshot.rs, rollup.rs, delete.rs, props.rs   one per feature; props and delete are randomized
 examples/             ingest_bench.rs, concurrent_bench.rs
 ```
 
@@ -261,6 +261,33 @@ tolerable. Correctness is checked by a randomized test that mixes in-order, late
 and duplicate writes with flushes, compactions and crash-style reopens against a
 `BTreeMap` model.
 
+## Deletes
+
+`delete_range(&key, start, end)` removes the points in `[start, end)` and returns how many
+went; `delete_select` does it for every series a selector matches. The series stays in the
+catalog (empty). Durable once the call returns.
+
+How it stays correct across crashes:
+
+- The delete is logged in the WAL as two records written together (range, then a *mark*:
+  the chunk id counter at that moment). Replay only sees it if both halves made it.
+- Sealed chunks overlapping the range are rewritten without those points (new chunk, old one
+  swapped out under the series lock), raw in-memory chunks and the late buffer are cut, and
+  the active chunk is frozen so later writes get chunk ids above the mark.
+- Replay applies a delete to memory (everything there was written before it) and to sealed
+  chunks with an id below the mark, nothing else. Without the mark a point written *after* a
+  delete, inside its range, and sealed before the crash would be deleted again by the replay
+  (a randomized test found exactly that).
+- The WAL is not truncated while any chunk file a delete replaced still exists (a running
+  query can keep it alive). Otherwise a crash could bring back the old file with no delete
+  record left to remove its points again.
+- The mark also bumps the id counter on open, so ids handed out after a restart stay above
+  every mark still in the log.
+
+Not atomic across chunks after a crash *during* the call (it never returned, so nothing was
+promised): some chunks may already be rewritten. Concurrent queries see all of the delete or
+none of it. Old binaries must not open a WAL that holds delete records.
+
 ## Recovery
 
 On open: catalog and chunk metas are loaded, orphan/tmp files removed, chunks
@@ -329,8 +356,8 @@ Backpressure: appends to a series block once it has more than
   that was in flight may survive as a prefix. Acknowledged batches are never lost.
 - Sum is a plain f64 accumulation.
 - No fsync of the chunk directory after renames.
-- No delete API. Data leaves through `retention` only: a delete needs a tombstone record in
-  the WAL and catalog, and getting that wrong loses data, so it is not here.
+- Deleting rewrites every sealed chunk that overlaps the range (see Deletes), and a series
+  can't be removed from the catalog, only emptied.
 - Query language: no subqueries, no joins on
   different label sets. `rate` extrapolates nothing, it is `increase / (last_ts - first_ts)`.
 - The HTTP server has no TLS (std has none). An optional bearer token (`ServerConfig`, `tsdb serve --token`) guards everything but `/health`, but it travels in clear text: keep the server on localhost or behind a TLS proxy.

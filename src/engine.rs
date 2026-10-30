@@ -53,6 +53,9 @@ struct Inner {
     wake: Condvar,
     last_err: Mutex<Option<String>>,
     m: Counters,
+    // meta files of chunks a delete replaced. while any still exists the wal keeps its delete
+    // record (see flush_locked)
+    pending_del: Mutex<Vec<PathBuf>>,
     _dir_lock: File,
 }
 
@@ -203,6 +206,29 @@ impl Engine {
             }
         }
         Ok((total.count > 0).then_some(total))
+    }
+
+    // Removes the points of one series in [start, end) and returns how many went. Durable once it
+    // returns: the delete is logged in the wal and replayed after a crash. Sealed chunks that
+    // overlap the range are rewritten, so a big range costs a rewrite of those chunks.
+    // Concurrent queries see either all of the delete or none of it; a crash in the middle
+    // may leave it applied to only some chunks (the call never returned, so nothing was
+    // promised). Late points still waiting in the buffer count separately from the sealed
+    // point they would have overwritten. The series stays in the catalog, empty.
+    pub fn delete_range(&self, key: &SeriesKey, start: i64, end: i64) -> Result<u64> {
+        match self.inner.find(key) {
+            Some(s) => self.inner.delete(&s, start, end, None),
+            None => Ok(0),
+        }
+    }
+
+    // delete_range over every series the selector matches
+    pub fn delete_select(&self, sel: &Selector, start: i64, end: i64) -> Result<u64> {
+        let mut n = 0;
+        for s in self.inner.resolve(sel) {
+            n += self.inner.delete(&s, start, end, None)?;
+        }
+        Ok(n)
     }
 
     // like GROUP BY label: one aggregate per value of `label`. series without the label are
@@ -405,6 +431,7 @@ impl Inner {
             wake: Condvar::new(),
             last_err: Mutex::new(None),
             m: Counters::default(),
+            pending_del: Mutex::new(Vec::new()),
             _dir_lock: lock,
         });
 
@@ -412,10 +439,26 @@ impl Inner {
         // already. Late records can't be judged by ts, so they are always re-applied; that is
         // idempotent (same ts, same value) and the wal replays in write order, so the last
         // write per ts still wins.
+        // chunk ids named by a delete record must stay in the past: ids handed out from here
+        // on have to be above every mark still in the log, or a second replay would mistake
+        // fresh chunks for old ones
+        if let Some(m) = recs
+            .iter()
+            .filter(|r| r.del_end.is_some())
+            .map(|r| r.del_mark)
+            .max()
+        {
+            inner.next_id.fetch_max(m, Ordering::Relaxed);
+        }
         for r in recs {
             let Some(s) = inner.find_id(r.series) else {
                 continue;
             };
+            if let Some(end) = r.del_end {
+                // replayed in write order, so memory holds exactly what was written before it
+                inner.delete(&s, r.point.ts, end, Some(r.del_mark))?;
+                continue;
+            }
             let mut st = s.state.write().unwrap();
             if !r.late && st.last_ts.is_some_and(|l| r.point.ts <= l) {
                 continue;
@@ -423,6 +466,106 @@ impl Inner {
             st.apply(&[r.point], &[r.late], &inner.cfg, &inner.next_id);
         }
         Ok(inner)
+    }
+
+    fn deletes_settled(&self) -> bool {
+        let mut p = self.pending_del.lock().unwrap();
+        p.retain(|m| m.exists());
+        p.is_empty()
+    }
+
+    // The delete is logged with a mark: the chunk id counter at that moment. Every chunk the
+    // series has then has an id below it, everything created later is above. On replay only
+    // sealed chunks below the mark may be cut; the ones above were written after the delete and
+    // can legitimately hold points in the range (sealed before the crash, but their wal records
+    // sit behind the delete record). The active chunk is frozen so later writes get an id above
+    // the mark too.
+    // `replay` is Some(mark from the log) while replaying, where nothing is logged again.
+    fn delete(&self, s: &Series, start: i64, end: i64, replay: Option<u64>) -> Result<u64> {
+        if start >= end {
+            return Ok(0);
+        }
+        // nobody seals, merges or compacts while we swap chunks
+        let _m = self.maintenance.lock().unwrap();
+
+        // 1. rewrite the overlapping sealed chunks. nothing is visible or logged yet, so an
+        //    error here leaves the series untouched
+        let olds: Vec<_> = s
+            .state
+            .read()
+            .unwrap()
+            .sealed_overlapping(start, end)
+            .into_iter()
+            .filter(|c| replay.is_none_or(|m| c.id < m))
+            .collect();
+        let mut news = Vec::new();
+        let mut removed = 0u64;
+        for c in &olds {
+            let (ts, vals) = c.read_all()?;
+            let (mut kt, mut kv) = (Vec::new(), Vec::new());
+            for (&t, &v) in ts.iter().zip(&vals) {
+                if t < start || t >= end {
+                    kt.push(t);
+                    kv.push(v);
+                }
+            }
+            removed += (ts.len() - kt.len()) as u64;
+            if kt.is_empty() {
+                continue;
+            }
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let chunk = SealedChunk::write(
+                &self.chunk_dir,
+                s.id,
+                id,
+                c.bucket,
+                &kt,
+                &kv,
+                self.sync_files(),
+            )?;
+            news.push(Arc::new(chunk.with_cache(self.cache.clone())));
+        }
+
+        // 2. log, cut memory and swap chunks as one step under the series lock
+        let mut st = s.state.write().unwrap();
+        if replay.is_none() {
+            let mark = self.next_id.load(Ordering::Relaxed);
+            if let Err(e) = self
+                .wal_for(s.id)
+                .lock()
+                .unwrap()
+                .append_delete(s.id, start, end, mark)
+            {
+                drop(st);
+                for n in &news {
+                    n.mark_obsolete();
+                }
+                return Err(e);
+            }
+        }
+        removed += st.cut_memory(start, end);
+        st.freeze_active();
+        for c in &olds {
+            if let Some(v) = st.sealed.get_mut(&c.bucket) {
+                v.retain(|x| x.id != c.id);
+            }
+        }
+        st.sealed.retain(|_, v| !v.is_empty());
+        for n in news {
+            st.insert_sealed(n);
+        }
+        drop(st);
+
+        self.pending_del
+            .lock()
+            .unwrap()
+            .extend(olds.iter().map(|c| c.meta_path()));
+        for c in &olds {
+            c.mark_obsolete();
+        }
+        inc(&self.m.deletes, 1);
+        inc(&self.m.points_deleted, removed);
+        Ok(removed)
     }
 
     fn wal_for(&self, id: SeriesId) -> &Mutex<Wal> {
@@ -845,7 +988,7 @@ impl Inner {
         }
 
         let guards: Vec<_> = series.iter().map(|s| s.state.write().unwrap()).collect();
-        if guards.iter().all(|g| g.is_drained()) {
+        if guards.iter().all(|g| g.is_drained()) && self.deletes_settled() {
             for w in &self.wal {
                 w.lock().unwrap().reset()?;
             }
