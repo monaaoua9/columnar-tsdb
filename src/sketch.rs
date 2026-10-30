@@ -197,7 +197,9 @@ mod tests {
 
     // tiny lcg, no rand crate here
     fn rng(seed: &mut u64) -> f64 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 11) as f64 / (1u64 << 53) as f64
     }
 
@@ -216,7 +218,10 @@ mod tests {
         vals.sort_by(|a, b| a.total_cmp(b));
         for q in [0.01, 0.25, 0.5, 0.9, 0.99, 0.999] {
             let (got, want) = (sk.quantile(q).unwrap(), exact(&vals, q));
-            assert!((got - want).abs() / want <= 0.0101, "q={q} got={got} want={want}");
+            assert!(
+                (got - want).abs() / want <= 0.0101,
+                "q={q} got={got} want={want}"
+            );
         }
         // 5 decades of range fit in a few hundred buckets
         assert!(sk.buckets() < 1500, "{}", sk.buckets());
@@ -274,6 +279,9 @@ mod tests {
         sk.add(f64::INFINITY);
         assert_eq!(sk.count(), 0);
         sk.add(4.0);
-        assert_eq!(sk.quantile(0.5).map(|v| (v - 4.0).abs() / 4.0 < 0.011), Some(true));
+        assert_eq!(
+            sk.quantile(0.5).map(|v| (v - 4.0).abs() / 4.0 < 0.011),
+            Some(true)
+        );
     }
 }

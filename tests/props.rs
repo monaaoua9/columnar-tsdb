@@ -87,7 +87,9 @@ fn gorilla_codec_roundtrips_bit_exact() {
 
 #[test]
 fn constant_series_compress_hard() {
-    let ts: Vec<i64> = (0..10_000).map(|i| 1_700_000_000_000 + i * 10_000).collect();
+    let ts: Vec<i64> = (0..10_000)
+        .map(|i| 1_700_000_000_000 + i * 10_000)
+        .collect();
     let v = vec![3.5; 10_000];
     // about one bit per point each, plus headers
     assert!(timestamp::encode(&ts).len() < 1500);
@@ -95,8 +97,12 @@ fn constant_series_compress_hard() {
 }
 
 fn gen_text(r: &mut Rng, max: u64) -> String {
-    const ALPHA: &[char] = &['a', 'z', '0', '_', '-', ' ', ',', '=', '\\', '"', '{', '.', 'é', 'ع'];
-    (0..r.below(max)).map(|_| ALPHA[r.below(ALPHA.len() as u64) as usize]).collect()
+    const ALPHA: &[char] = &[
+        'a', 'z', '0', '_', '-', ' ', ',', '=', '\\', '"', '{', '.', 'é', 'ع',
+    ];
+    (0..r.below(max))
+        .map(|_| ALPHA[r.below(ALPHA.len() as u64) as usize])
+        .collect()
 }
 
 #[test]
@@ -141,7 +147,9 @@ fn query_parser_never_panics() {
     ];
     let mut r = Rng::new(4);
     for _ in 0..30_000 {
-        let mut b: Vec<char> = seeds[r.below(seeds.len() as u64) as usize].chars().collect();
+        let mut b: Vec<char> = seeds[r.below(seeds.len() as u64) as usize]
+            .chars()
+            .collect();
         for _ in 0..1 + r.below(4) {
             if b.is_empty() {
                 break;
@@ -165,10 +173,19 @@ fn sketch_quantiles_are_monotone_and_bounded() {
     let mut r = Rng::new(5);
     for _ in 0..50 {
         let n = 1 + r.below(2000) as usize;
-        let vals: Vec<f64> = (0..n).map(|_| (r.unit() - 0.3) * 10f64.powi(r.below(8) as i32)).collect();
-        let pts: Vec<Point> = vals.iter().enumerate().map(|(i, &v)| Point::new(i as i64, v)).collect();
+        let vals: Vec<f64> = (0..n)
+            .map(|_| (r.unit() - 0.3) * 10f64.powi(r.below(8) as i32))
+            .collect();
+        let pts: Vec<Point> = vals
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| Point::new(i as i64, v))
+            .collect();
         let sk = Sketch::from_points(0.02, &pts);
-        let (lo, hi) = (vals.iter().cloned().fold(f64::MAX, f64::min), vals.iter().cloned().fold(f64::MIN, f64::max));
+        let (lo, hi) = (
+            vals.iter().cloned().fold(f64::MAX, f64::min),
+            vals.iter().cloned().fold(f64::MIN, f64::max),
+        );
         let mut prev = f64::NEG_INFINITY;
         for i in 0..=20 {
             let q = sk.quantile(i as f64 / 20.0).unwrap();
@@ -185,7 +202,9 @@ fn exact_quantile_matches_sorted_order() {
     let mut r = Rng::new(6);
     for _ in 0..200 {
         let n = 1 + r.below(300) as usize;
-        let pts: Vec<Point> = (0..n).map(|i| Point::new(i as i64, r.unit() * 100.0)).collect();
+        let pts: Vec<Point> = (0..n)
+            .map(|i| Point::new(i as i64, r.unit() * 100.0))
+            .collect();
         let mut sorted: Vec<f64> = pts.iter().map(|p| p.value).collect();
         sorted.sort_by(|a, b| a.total_cmp(b));
         assert_eq!(funcs::quantile(&pts, 0.0), Some(sorted[0]));

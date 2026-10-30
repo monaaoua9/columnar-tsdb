@@ -24,7 +24,9 @@ pub(crate) fn link_or_copy(src: &Path, dst: &Path) -> io::Result<bool> {
 
 pub(crate) fn empty_target(dest: &Path) -> Result<()> {
     if dest.exists() && (!dest.is_dir() || fs::read_dir(dest)?.next().is_some()) {
-        return Err(Error::BadConfig("snapshot target must be an empty directory"));
+        return Err(Error::BadConfig(
+            "snapshot target must be an empty directory",
+        ));
     }
     fs::create_dir_all(dest)?;
     Ok(())
@@ -35,7 +37,9 @@ pub(crate) fn empty_target(dest: &Path) -> Result<()> {
 pub fn restore(src: &Path, dst: &Path) -> Result<u64> {
     if src.join("LOCK").exists() {
         // a snapshot never carries LOCK; a live dir does, and copying that mid-write is not a backup
-        return Err(Error::BadConfig("source looks like a live data dir, snapshot it first"));
+        return Err(Error::BadConfig(
+            "source looks like a live data dir, snapshot it first",
+        ));
     }
     empty_target(dst)?;
     let mut bytes = 0;

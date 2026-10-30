@@ -152,12 +152,20 @@ impl Engine {
 
     // every series in the catalog, ordered by id
     pub fn list_series(&self) -> Vec<SeriesKey> {
-        self.inner.series_list().iter().map(|s| s.key.clone()).collect()
+        self.inner
+            .series_list()
+            .iter()
+            .map(|s| s.key.clone())
+            .collect()
     }
 
     // distinct metric names, sorted
     pub fn metric_names(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.list_series().iter().map(|k| k.name().to_string()).collect();
+        let mut v: Vec<String> = self
+            .list_series()
+            .iter()
+            .map(|k| k.name().to_string())
+            .collect();
         v.sort();
         v.dedup();
         v
@@ -778,7 +786,11 @@ impl Inner {
                 match snapshot::link_or_copy(&src, &dst) {
                     Ok(linked) => {
                         let n = fs::metadata(&dst)?.len();
-                        if linked { bytes.0 += n } else { bytes.1 += n }
+                        if linked {
+                            bytes.0 += n
+                        } else {
+                            bytes.1 += n
+                        }
                         done.push(dst);
                     }
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {

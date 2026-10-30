@@ -33,7 +33,13 @@ fn get(srv: &Server, path: &str) -> (u16, String) {
 }
 
 fn post(srv: &Server, path: &str, body: &str) -> (u16, String) {
-    http(srv, &format!("POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}", body.len()))
+    http(
+        srv,
+        &format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
 }
 
 #[test]
@@ -54,10 +60,22 @@ fn write_then_query() {
     let q = "avg_over_time(cpu%7Bhost%3D%22a%22%7D)";
     let (code, body) = get(&srv, &format!("/query?query={q}&start=0&end=3000&step=1s"));
     assert_eq!(code, 200, "{body}");
-    assert!(body.contains("[1000,1]") && body.contains("[2000,3]"), "{body}");
+    assert!(
+        body.contains("[1000,1]") && body.contains("[2000,3]"),
+        "{body}"
+    );
     assert!(body.contains("\"step\":1000"), "{body}");
 
-    assert_eq!(e.query_range(&columnar_tsdb::SeriesKey::new("cpu").label("host", "a"), 0, 9999).unwrap().len(), 2);
+    assert_eq!(
+        e.query_range(
+            &columnar_tsdb::SeriesKey::new("cpu").label("host", "a"),
+            0,
+            9999
+        )
+        .unwrap()
+        .len(),
+        2
+    );
     srv.shutdown();
     drop(e);
     let _ = std::fs::remove_dir_all(dir);
@@ -79,7 +97,10 @@ fn errors_use_the_error_envelope() {
     let (e, srv, dir) = setup("err");
     let (c, b) = post(&srv, "/write", "good v=1 1\nbad line here\n");
     assert_eq!(c, 400);
-    assert!(b.contains("\"code\":\"BAD_LINE\"") && b.contains("line 2"), "{b}");
+    assert!(
+        b.contains("\"code\":\"BAD_LINE\"") && b.contains("line 2"),
+        "{b}"
+    );
     // all-or-nothing: the good line before the bad one was not written
     assert!(e.select(&columnar_tsdb::Selector::new("good")).is_empty());
 
@@ -105,7 +126,10 @@ fn metrics_endpoint_and_oversize_body() {
     assert_eq!(c, 200);
     assert!(b.contains("tsdb_points_appended_total 1\n"), "{b}");
 
-    let big = format!("POST /write HTTP/1.1\r\nContent-Length: {}\r\n\r\n", 9 << 20);
+    let big = format!(
+        "POST /write HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+        9 << 20
+    );
     assert_eq!(http(&srv, &big).0, 413);
     srv.shutdown();
     drop(e);

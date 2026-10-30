@@ -27,7 +27,11 @@ fn fill(e: &Engine, host: &str, from_min: i64, mins: i64) {
 }
 
 fn vals(e: &Engine, k: &SeriesKey) -> Vec<(i64, f64)> {
-    e.query_range(k, i64::MIN, i64::MAX).unwrap().iter().map(|p| (p.ts, p.value)).collect()
+    e.query_range(k, i64::MIN, i64::MAX)
+        .unwrap()
+        .iter()
+        .map(|p| (p.ts, p.value))
+        .collect()
 }
 
 #[test]
@@ -103,11 +107,14 @@ fn many_series_and_selectors() {
     for h in ["a", "b", "c"] {
         fill(&e, h, 0, 4);
     }
-    e.append(&SeriesKey::new("mem").label("host", "a"), 0, 1.0).unwrap();
+    e.append(&SeriesKey::new("mem").label("host", "a"), 0, 1.0)
+        .unwrap();
 
     let r = Rollup::new(Selector::new("cpu").ne("host", "c"), 120_000).with_aggs(&[RollupAgg::Avg]);
     assert_eq!(r.run(&e, 4 * 60_000).unwrap(), 2 * 2);
-    assert!(e.bounds(&rollup_key(&key("c"), 120_000, RollupAgg::Avg)).is_none());
+    assert!(e
+        .bounds(&rollup_key(&key("c"), 120_000, RollupAgg::Avg))
+        .is_none());
     assert!(e.select(&Selector::new("mem:2m:avg")).is_empty());
 
     // and the rolled series is queryable like any other
@@ -130,7 +137,10 @@ fn rollups_outlive_raw_data() {
     std::thread::sleep(Duration::from_millis(100));
 
     let raw_oldest = e.bounds(&key("a")).unwrap().0;
-    assert!(raw_oldest > 0, "raw data should have been expired, oldest = {raw_oldest}");
+    assert!(
+        raw_oldest > 0,
+        "raw data should have been expired, oldest = {raw_oldest}"
+    );
     let rolled = vals(&e, &rollup_key(&key("a"), 60_000, RollupAgg::Count));
     assert_eq!(rolled.len(), 4);
     drop(e);
@@ -141,8 +151,14 @@ fn rollups_outlive_raw_data() {
 fn bad_params() {
     let (e, dir) = open("bad", None);
     let sel = Selector::new("cpu");
-    assert!(matches!(Rollup::new(sel.clone(), 0).run(&e, 10), Err(Error::BadConfig(_))));
-    assert!(matches!(Rollup::new(sel.clone(), -5).run(&e, 10), Err(Error::BadConfig(_))));
+    assert!(matches!(
+        Rollup::new(sel.clone(), 0).run(&e, 10),
+        Err(Error::BadConfig(_))
+    ));
+    assert!(matches!(
+        Rollup::new(sel.clone(), -5).run(&e, 10),
+        Err(Error::BadConfig(_))
+    ));
     assert!(matches!(
         Rollup::new(sel, 10).with_aggs(&[]).run(&e, 10),
         Err(Error::BadConfig(_))

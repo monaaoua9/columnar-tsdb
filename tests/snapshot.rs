@@ -46,9 +46,7 @@ fn snapshot_matches_source_and_is_independent() {
 
     let s = Engine::open(cfg(&snap)).unwrap();
     for h in ["a", "b", "c"] {
-        let want: Vec<Point> = e
-            .query_range(&key(h), i64::MIN, 10_000)
-            .unwrap();
+        let want: Vec<Point> = e.query_range(&key(h), i64::MIN, 10_000).unwrap();
         let got = s.query_range(&key(h), i64::MIN, i64::MAX).unwrap();
         assert_eq!(got, want, "host {h}");
     }

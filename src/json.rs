@@ -111,7 +111,10 @@ mod tests {
 
         let mut labels = BTreeMap::new();
         labels.insert("host".to_string(), "a\"1".to_string());
-        let r = Row { labels, points: vec![Point::new(10, 1.5), Point::new(20, f64::INFINITY)] };
+        let r = Row {
+            labels,
+            points: vec![Point::new(10, 1.5), Point::new(20, f64::INFINITY)],
+        };
         let mut o = String::new();
         value(&Value::Vector(vec![r]), &mut o);
         assert_eq!(

@@ -59,7 +59,11 @@ pub enum Expr {
     Select(Selector, Option<i64>),
     Call(Func, Selector, Option<i64>),
     Agg(AggOp, Vec<String>, Box<Expr>),
-    TopK { k: usize, largest: bool, arg: Box<Expr> },
+    TopK {
+        k: usize,
+        largest: bool,
+        arg: Box<Expr>,
+    },
     Bin(BinOp, Box<Expr>, Box<Expr>),
 }
 
@@ -512,7 +516,10 @@ mod tests {
     #[test]
     fn selector_with_matchers_and_range() {
         let e = parse(r#"cpu{dc="fra", host!="web-9", rack=~"r-*",}[5m]"#).unwrap();
-        let want = sel("cpu").eq("dc", "fra").ne("host", "web-9").like("rack", "r-*");
+        let want = sel("cpu")
+            .eq("dc", "fra")
+            .ne("host", "web-9")
+            .like("rack", "r-*");
         assert_eq!(e, Expr::Select(want, Some(300_000)));
     }
 
@@ -549,7 +556,14 @@ mod tests {
     #[test]
     fn topk() {
         let e = parse("topk(3, avg_over_time(cpu[5m]))").unwrap();
-        assert!(matches!(e, Expr::TopK { k: 3, largest: true, .. }));
+        assert!(matches!(
+            e,
+            Expr::TopK {
+                k: 3,
+                largest: true,
+                ..
+            }
+        ));
         assert!(parse("topk(0, x)").is_err());
         assert!(parse("topk(1.5, x)").is_err());
     }
@@ -558,8 +572,12 @@ mod tests {
     fn precedence() {
         // 1 + 2 * 3 > 6  ->  (1 + (2*3)) > 6
         let e = parse("1 + 2 * 3 > 6").unwrap();
-        let Expr::Bin(BinOp::Gt, l, _) = e else { panic!() };
-        let Expr::Bin(BinOp::Add, _, r) = *l else { panic!() };
+        let Expr::Bin(BinOp::Gt, l, _) = e else {
+            panic!()
+        };
+        let Expr::Bin(BinOp::Add, _, r) = *l else {
+            panic!()
+        };
         assert!(matches!(*r, Expr::Bin(BinOp::Mul, _, _)));
         let neg = parse("-x").unwrap();
         assert!(matches!(neg, Expr::Bin(BinOp::Sub, _, _)));

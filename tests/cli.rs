@@ -35,25 +35,39 @@ fn import_query_export_roundtrip() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(text(&o).contains("imported 3 points"));
 
-    let o = tsdb(&["query", ds, "sum(reqs)", "--start", "0", "--end", "3000"], None);
+    let o = tsdb(
+        &["query", ds, "sum(reqs)", "--start", "0", "--end", "3000"],
+        None,
+    );
     assert!(o.status.success());
     assert_eq!(text(&o).trim(), "{} 25 @ 3000");
 
-    let o = tsdb(&["query", ds, "reqs", "--start", "0", "--end", "3000", "--step", "1s"], None);
+    let o = tsdb(
+        &[
+            "query", ds, "reqs", "--start", "0", "--end", "3000", "--step", "1s",
+        ],
+        None,
+    );
     let t = text(&o);
     assert!(t.contains("host=a") && t.contains("20 @ 2000"), "{t}");
 
     let o = tsdb(&["export", ds], None);
     let lines: Vec<String> = text(&o).lines().map(String::from).collect();
     assert_eq!(lines.len(), 3);
-    assert!(lines.contains(&"reqs,host=b value=5 1500".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"reqs,host=b value=5 1500".to_string()),
+        "{lines:?}"
+    );
 
     let o = tsdb(&["series", ds], None);
     assert_eq!(text(&o).lines().count(), 2);
 
     // what we exported imports cleanly into a fresh db
     let d2 = tmp("rt2");
-    let o = tsdb(&["import", d2.to_str().unwrap(), "-"], Some(&lines.join("\n")));
+    let o = tsdb(
+        &["import", d2.to_str().unwrap(), "-"],
+        Some(&lines.join("\n")),
+    );
     assert!(o.status.success());
     let o = tsdb(&["export", d2.to_str().unwrap(), "reqs"], None);
     assert_eq!(text(&o).lines().count(), 3);

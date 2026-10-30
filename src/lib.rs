@@ -18,8 +18,8 @@ mod json;
 pub mod lineproto;
 pub mod query;
 pub mod rollup;
-pub mod sketch;
 pub mod server;
+pub mod sketch;
 pub mod snapshot;
 
 pub mod compress;
@@ -33,6 +33,6 @@ mod testutil;
 
 pub use config::{Config, SyncMode};
 pub use engine::{Engine, EngineStats};
-pub use metrics::Metrics;
 pub use error::{Error, Result};
+pub use metrics::Metrics;
 pub use model::{Aggregate, Matcher, Point, Selector, SeriesKey};

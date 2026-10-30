@@ -41,28 +41,34 @@ impl Server {
 
         let accept = {
             let stop = stop.clone();
-            thread::Builder::new().name("tsdb-http".into()).spawn(move || {
-                for conn in listener.incoming() {
-                    if stop.load(Ordering::Acquire) {
-                        return;
+            thread::Builder::new()
+                .name("tsdb-http".into())
+                .spawn(move || {
+                    for conn in listener.incoming() {
+                        if stop.load(Ordering::Acquire) {
+                            return;
+                        }
+                        let Ok(mut s) = conn else { continue };
+                        if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNS {
+                            live.fetch_sub(1, Ordering::AcqRel);
+                            let _ = respond(&mut s, 503, "text/plain", b"busy\n");
+                            continue;
+                        }
+                        let (e, live) = (engine.clone(), live.clone());
+                        thread::spawn(move || {
+                            let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+                            let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+                            let _ = serve(&e, s);
+                            live.fetch_sub(1, Ordering::AcqRel);
+                        });
                     }
-                    let Ok(mut s) = conn else { continue };
-                    if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNS {
-                        live.fetch_sub(1, Ordering::AcqRel);
-                        let _ = respond(&mut s, 503, "text/plain", b"busy\n");
-                        continue;
-                    }
-                    let (e, live) = (engine.clone(), live.clone());
-                    thread::spawn(move || {
-                        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
-                        let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
-                        let _ = serve(&e, s);
-                        live.fetch_sub(1, Ordering::AcqRel);
-                    });
-                }
-            })?
+                })?
         };
-        Ok(Server { addr, stop, accept: Some(accept) })
+        Ok(Server {
+            addr,
+            stop,
+            accept: Some(accept),
+        })
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -98,7 +104,10 @@ struct Req {
 
 impl Req {
     fn param(&self, k: &str) -> Option<&str> {
-        self.query.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
+        self.query
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -109,7 +118,10 @@ pub(crate) fn url_decode(s: &str) -> String {
     while i < b.len() {
         match b[i] {
             b'+' => out.push(b' '),
-            b'%' if b.get(i + 1..i + 3).is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit)) => {
+            b'%' if b
+                .get(i + 1..i + 3)
+                .is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit)) =>
+            {
                 let hex = std::str::from_utf8(&b[i + 1..i + 3]).unwrap();
                 out.push(u8::from_str_radix(hex, 16).unwrap());
                 i += 2;
@@ -135,7 +147,10 @@ fn read_line(r: &mut impl BufRead) -> io::Result<String> {
     let mut line = String::new();
     let n = r.by_ref().take(MAX_HEAD_LINE).read_line(&mut line)?;
     if n as u64 >= MAX_HEAD_LINE && !line.ends_with('\n') {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "header line too long"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "header line too long",
+        ));
     }
     Ok(line.trim_end().to_string())
 }
@@ -145,7 +160,10 @@ fn read_request(stream: &TcpStream) -> io::Result<Req> {
     let first = read_line(&mut r)?;
     let mut it = first.split(' ');
     let (Some(method), Some(target), Some(_ver)) = (it.next(), it.next(), it.next()) else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad request line"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad request line",
+        ));
     };
     let (path, qs) = target.split_once('?').unwrap_or((target, ""));
 
@@ -157,7 +175,9 @@ fn read_request(stream: &TcpStream) -> io::Result<Req> {
         }
         if let Some((k, v)) = h.split_once(':') {
             if k.eq_ignore_ascii_case("content-length") {
-                len = v.trim().parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad content-length"))?;
+                len = v.trim().parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "bad content-length")
+                })?;
             }
         }
     }
@@ -225,15 +245,25 @@ pub(crate) fn parse_time(s: &str, now: i64) -> Result<i64> {
         }
         return Err(Error::Query(format!("bad time {s:?}")));
     }
-    s.parse().map_err(|_| Error::Query(format!("bad time {s:?}")))
+    s.parse()
+        .map_err(|_| Error::Query(format!("bad time {s:?}")))
 }
 
 fn serve(engine: &Engine, mut s: TcpStream) -> io::Result<()> {
     let req = match read_request(&s) {
         Ok(r) => r,
         Err(e) => {
-            let code = if e.to_string().contains("too large") { 413 } else { 400 };
-            return respond(&mut s, code, "application/json", &error_body("BAD_REQUEST", &e.to_string()));
+            let code = if e.to_string().contains("too large") {
+                413
+            } else {
+                400
+            };
+            return respond(
+                &mut s,
+                code,
+                "application/json",
+                &error_body("BAD_REQUEST", &e.to_string()),
+            );
         }
     };
     let (code, ctype, body) = route(engine, &req);
@@ -245,7 +275,11 @@ fn route(engine: &Engine, req: &Req) -> (u16, &'static str, Vec<u8>) {
     let fail = |code: u16, c: &str, m: &str| (code, JSON, error_body(c, m));
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/health") => (200, "text/plain", b"ok\n".to_vec()),
-        ("GET", "/metrics") => (200, "text/plain; version=0.0.4", engine.render_metrics().into_bytes()),
+        ("GET", "/metrics") => (
+            200,
+            "text/plain; version=0.0.4",
+            engine.render_metrics().into_bytes(),
+        ),
         ("POST", "/write") => {
             let now = now_ms();
             let default_ts = match req.param("ts").map(|t| parse_time(t, now)) {
@@ -259,7 +293,9 @@ fn route(engine: &Engine, req: &Req) -> (u16, &'static str, Vec<u8>) {
             match lineproto::ingest(engine, text, default_ts) {
                 Ok(_) => (204, JSON, Vec::new()),
                 Err(Error::TooOld { .. }) => fail(400, "TOO_OLD", "point older than retention"),
-                Err(e @ (Error::Corrupt(_) | Error::BadValue(_))) => fail(400, "BAD_LINE", &e.to_string()),
+                Err(e @ (Error::Corrupt(_) | Error::BadValue(_))) => {
+                    fail(400, "BAD_LINE", &e.to_string())
+                }
                 Err(e) => fail(500, "INTERNAL", &e.to_string()),
             }
         }
@@ -270,7 +306,9 @@ fn route(engine: &Engine, req: &Req) -> (u16, &'static str, Vec<u8>) {
             };
             let run = || -> Result<(Ctx, crate::query::Value)> {
                 let end = req.param("end").map_or(Ok(now), |t| parse_time(t, now))?;
-                let start = req.param("start").map_or(Ok(end.saturating_sub(3_600_000)), |t| parse_time(t, now))?;
+                let start = req
+                    .param("start")
+                    .map_or(Ok(end.saturating_sub(3_600_000)), |t| parse_time(t, now))?;
                 let ctx = match req.param("step") {
                     None => Ctx::instant(start, end),
                     Some(st) => Ctx::stepped(start, end, parse_duration(st)?),
@@ -282,7 +320,10 @@ fn route(engine: &Engine, req: &Req) -> (u16, &'static str, Vec<u8>) {
                 Ok((ctx, v)) => {
                     let mut o = String::from("{\"data\":");
                     json::value(&v, &mut o);
-                    o.push_str(&format!(",\"meta\":{{\"start\":{},\"end\":{}", ctx.start, ctx.end));
+                    o.push_str(&format!(
+                        ",\"meta\":{{\"start\":{},\"end\":{}",
+                        ctx.start, ctx.end
+                    ));
                     if let Some(s) = ctx.step {
                         o.push_str(&format!(",\"step\":{s}"));
                     }
@@ -293,7 +334,9 @@ fn route(engine: &Engine, req: &Req) -> (u16, &'static str, Vec<u8>) {
                 Err(e) => fail(500, "INTERNAL", &e.to_string()),
             }
         }
-        (_, "/health" | "/metrics" | "/write" | "/query") => fail(405, "METHOD_NOT_ALLOWED", "wrong method"),
+        (_, "/health" | "/metrics" | "/write" | "/query") => {
+            fail(405, "METHOD_NOT_ALLOWED", "wrong method")
+        }
         _ => fail(404, "NOT_FOUND", "no such route"),
     }
 }
@@ -334,6 +377,9 @@ mod tests {
     #[test]
     fn error_bodies_are_json() {
         let b = String::from_utf8(error_body("X", "say \"hi\"")).unwrap();
-        assert_eq!(b, "{\"error\":{\"code\":\"X\",\"message\":\"say \\\"hi\\\"\"}}");
+        assert_eq!(
+            b,
+            "{\"error\":{\"code\":\"X\",\"message\":\"say \\\"hi\\\"\"}}"
+        );
     }
 }

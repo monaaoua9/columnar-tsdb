@@ -47,7 +47,13 @@ impl RollupAgg {
 
 // 300000 -> "5m"; odd sizes fall back to plain ms
 pub fn step_label(step: i64) -> String {
-    for (unit, ms) in [("w", 604_800_000), ("d", 86_400_000), ("h", 3_600_000), ("m", 60_000), ("s", 1000)] {
+    for (unit, ms) in [
+        ("w", 604_800_000),
+        ("d", 86_400_000),
+        ("h", 3_600_000),
+        ("m", 60_000),
+        ("s", 1000),
+    ] {
         if step % ms == 0 {
             return format!("{}{unit}", step / ms);
         }
@@ -56,7 +62,12 @@ pub fn step_label(step: i64) -> String {
 }
 
 pub fn rollup_key(src: &SeriesKey, step: i64, agg: RollupAgg) -> SeriesKey {
-    let mut k = SeriesKey::new(format!("{}:{}:{}", src.name(), step_label(step), agg.name()));
+    let mut k = SeriesKey::new(format!(
+        "{}:{}:{}",
+        src.name(),
+        step_label(step),
+        agg.name()
+    ));
     for (a, b) in src.labels() {
         k = k.label(a, b);
     }
@@ -72,7 +83,11 @@ pub struct Rollup {
 
 impl Rollup {
     pub fn new(source: Selector, step: i64) -> Rollup {
-        Rollup { source, step, aggs: RollupAgg::ALL.to_vec() }
+        Rollup {
+            source,
+            step,
+            aggs: RollupAgg::ALL.to_vec(),
+        }
     }
 
     pub fn with_aggs(mut self, aggs: &[RollupAgg]) -> Rollup {
@@ -93,7 +108,9 @@ impl Rollup {
         let mut written = 0;
 
         for key in engine.select(&self.source) {
-            let Some((first, _)) = engine.bounds(&key) else { continue };
+            let Some((first, _)) = engine.bounds(&key) else {
+                continue;
+            };
             // resume at the newest window already rolled (any agg will do, they move together)
             let done = engine
                 .bounds(&rollup_key(&key, self.step, self.aggs[0]))

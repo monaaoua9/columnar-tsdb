@@ -40,7 +40,8 @@ fn time_arg(s: &str, now: i64) -> Result<i64, Error> {
     if let Some(d) = s.strip_prefix("now-") {
         return Ok(now - parse_duration(d)?);
     }
-    s.parse().map_err(|_| Error::Query(format!("bad time {s:?}")))
+    s.parse()
+        .map_err(|_| Error::Query(format!("bad time {s:?}")))
 }
 
 // --flag value pairs after the positionals; unknown flags are an error
@@ -92,7 +93,10 @@ fn run(args: &[String]) -> Result<(), String> {
             let mut text = String::new();
             match rest.first().map(String::as_str) {
                 None | Some("-") => io::stdin().read_to_string(&mut text).map_err(io_err)?,
-                Some(path) => File::open(path).map_err(io_err)?.read_to_string(&mut text).map_err(io_err)?,
+                Some(path) => File::open(path)
+                    .map_err(io_err)?
+                    .read_to_string(&mut text)
+                    .map_err(io_err)?,
             };
             let eng = open(dir).map_err(e)?;
             let n = lineproto::ingest(&eng, &text, now_ms()).map_err(e)?;
@@ -117,8 +121,12 @@ fn run(args: &[String]) -> Result<(), String> {
             let fl = flags(&rest[1..], &["--start", "--end", "--step"])?;
             let get = |n: &str| fl.iter().find(|f| f.0 == n).map(|f| f.1);
             let now = now_ms();
-            let end = get("--end").map_or(Ok(now), |t| time_arg(t, now)).map_err(e)?;
-            let start = get("--start").map_or(Ok(end - 3_600_000), |t| time_arg(t, now)).map_err(e)?;
+            let end = get("--end")
+                .map_or(Ok(now), |t| time_arg(t, now))
+                .map_err(e)?;
+            let start = get("--start")
+                .map_or(Ok(end - 3_600_000), |t| time_arg(t, now))
+                .map_err(e)?;
             let ctx = match get("--step") {
                 Some(s) => Ctx::stepped(start, end, parse_duration(s).map_err(e)?),
                 None => Ctx::instant(start, end),

@@ -17,7 +17,9 @@ fn open(tag: &str) -> (Engine, PathBuf) {
 fn seed(e: &Engine) {
     for n in 1..=3 {
         let host = format!("web-{n}");
-        let reqs = SeriesKey::new("reqs").label("host", &host).label("dc", if n < 3 { "fra" } else { "ams" });
+        let reqs = SeriesKey::new("reqs")
+            .label("host", &host)
+            .label("dc", if n < 3 { "fra" } else { "ams" });
         let load = SeriesKey::new("load").label("host", &host);
         for i in 0..30 {
             e.append(&reqs, i * 10_000, (i * n) as f64).unwrap();
@@ -27,10 +29,17 @@ fn seed(e: &Engine) {
 }
 
 fn vector(v: Value) -> Vec<(String, Vec<(i64, f64)>)> {
-    let Value::Vector(rows) = v else { panic!("expected vector") };
+    let Value::Vector(rows) = v else {
+        panic!("expected vector")
+    };
     rows.into_iter()
         .map(|r| {
-            let lbl = r.labels.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
+            let lbl = r
+                .labels
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",");
             (lbl, r.points.iter().map(|p| (p.ts, p.value)).collect())
         })
         .collect()
@@ -96,7 +105,12 @@ fn topk_and_vector_division() {
 
     // requests per unit of load, matched on identical labels (dc differs so use by)
     let ratio = vector(
-        query::run(&e, "sum(rate(reqs[1m])) by (host) / sum(load) by (host)", &ctx).unwrap(),
+        query::run(
+            &e,
+            "sum(rate(reqs[1m])) by (host) / sum(load) by (host)",
+            &ctx,
+        )
+        .unwrap(),
     );
     assert_eq!(ratio.len(), 3);
     for (_, pts) in &ratio {

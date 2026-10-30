@@ -18,11 +18,21 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn instant(start: i64, end: i64) -> Ctx {
-        Ctx { start, end, step: None, per_sec: 1000 }
+        Ctx {
+            start,
+            end,
+            step: None,
+            per_sec: 1000,
+        }
     }
 
     pub fn stepped(start: i64, end: i64, step: i64) -> Ctx {
-        Ctx { start, end, step: Some(step), per_sec: 1000 }
+        Ctx {
+            start,
+            end,
+            step: Some(step),
+            per_sec: 1000,
+        }
     }
 }
 
@@ -125,7 +135,10 @@ fn reduce(
         if keep_name {
             labels.insert(NAME.into(), key.name().to_string());
         }
-        rows.push(Row { labels, points: out });
+        rows.push(Row {
+            labels,
+            points: out,
+        });
     }
     rows.sort_by(|a, b| a.labels.cmp(&b.labels));
     Ok(Value::Vector(rows))
@@ -192,7 +205,10 @@ fn arith(op: BinOp, a: f64, b: f64) -> Option<f64> {
 }
 
 fn is_cmp(op: BinOp) -> bool {
-    matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq)
+    matches!(
+        op,
+        BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq
+    )
 }
 
 fn binary(op: BinOp, l: Value, r: Value) -> Result<Value> {
@@ -204,7 +220,9 @@ fn binary(op: BinOp, l: Value, r: Value) -> Result<Value> {
             Some(v) => Ok(Value::Scalar(v)),
             None => qerr("scalar result is not finite"),
         },
-        (Value::Vector(rows), Value::Scalar(b)) => Ok(Value::Vector(map_rows(rows, |v| arith(op, v, b)))),
+        (Value::Vector(rows), Value::Scalar(b)) => {
+            Ok(Value::Vector(map_rows(rows, |v| arith(op, v, b))))
+        }
         (Value::Scalar(a), Value::Vector(rows)) => {
             if is_cmp(op) {
                 return qerr("scalar must be on the right of a comparison");
@@ -222,7 +240,9 @@ fn binary(op: BinOp, l: Value, r: Value) -> Result<Value> {
             let mut out = Vec::new();
             for row in a {
                 let labels = without_name(row.labels);
-                let Some(rp) = right.get(&labels) else { continue };
+                let Some(rp) = right.get(&labels) else {
+                    continue;
+                };
                 let pts: Vec<Point> = row
                     .points
                     .iter()
@@ -232,7 +252,10 @@ fn binary(op: BinOp, l: Value, r: Value) -> Result<Value> {
                     })
                     .collect();
                 if !pts.is_empty() {
-                    out.push(Row { labels, points: pts });
+                    out.push(Row {
+                        labels,
+                        points: pts,
+                    });
                 }
             }
             Ok(Value::Vector(out))
@@ -253,7 +276,10 @@ fn map_rows(rows: Vec<Row>, f: impl Fn(f64) -> Option<f64>) -> Vec<Row> {
                 .iter()
                 .filter_map(|p| f(p.value).map(|v| Point::new(p.ts, v)))
                 .collect();
-            (!pts.is_empty()).then(|| Row { labels: without_name(r.labels), points: pts })
+            (!pts.is_empty()).then(|| Row {
+                labels: without_name(r.labels),
+                points: pts,
+            })
         })
         .collect()
 }

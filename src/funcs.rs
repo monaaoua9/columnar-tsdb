@@ -232,7 +232,11 @@ mod tests {
 
     #[test]
     fn derivative_skips_duplicate_ts() {
-        let p = [Point::new(0, 0.0), Point::new(1000, 5.0), Point::new(1000, 9.0)];
+        let p = [
+            Point::new(0, 0.0),
+            Point::new(1000, 5.0),
+            Point::new(1000, 9.0),
+        ];
         let d = derivative(&p, 1000);
         assert_eq!(d, vec![Point::new(1000, 5.0)]);
     }
@@ -266,7 +270,10 @@ mod tests {
     fn parse_names() {
         assert_eq!(Func::parse("p99", None), Some(Func::Quantile(0.99)));
         assert_eq!(Func::parse("quantile", None), None);
-        assert_eq!(Func::parse("quantile", Some(0.3)), Some(Func::Quantile(0.3)));
+        assert_eq!(
+            Func::parse("quantile", Some(0.3)),
+            Some(Func::Quantile(0.3))
+        );
         assert_eq!(Func::parse("nope", None), None);
     }
 }

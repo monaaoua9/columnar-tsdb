@@ -103,13 +103,17 @@ pub fn parse_line(line: &str, default_ts: i64) -> Result<Line> {
     }
 
     let raw = parts[1].rsplit('=').next().unwrap_or("");
-    let value: f64 = raw.parse().map_err(|_| bad(line, "value is not a number"))?;
+    let value: f64 = raw
+        .parse()
+        .map_err(|_| bad(line, "value is not a number"))?;
     if !value.is_finite() {
         return Err(Error::BadValue(value));
     }
 
     let ts = match parts.get(2) {
-        Some(t) => t.parse().map_err(|_| bad(line, "timestamp is not an integer"))?,
+        Some(t) => t
+            .parse()
+            .map_err(|_| bad(line, "timestamp is not an integer"))?,
         None => default_ts,
     };
     Ok(Line { key, ts, value })
@@ -139,7 +143,10 @@ pub fn ingest(engine: &Engine, text: &str, default_ts: i64) -> Result<usize> {
     let n = lines.len();
     let mut by_series: HashMap<SeriesKey, Vec<Point>> = HashMap::new();
     for l in lines {
-        by_series.entry(l.key).or_default().push(Point::new(l.ts, l.value));
+        by_series
+            .entry(l.key)
+            .or_default()
+            .push(Point::new(l.ts, l.value));
     }
     for (k, pts) in &by_series {
         engine.append_batch(k, pts)?;
@@ -172,7 +179,12 @@ mod tests {
     #[test]
     fn full_line() {
         let l = parse_line("cpu,host=web-1,dc=fra value=41.5 1700000000000", 0).unwrap();
-        assert_eq!(l.key, SeriesKey::new("cpu").label("host", "web-1").label("dc", "fra"));
+        assert_eq!(
+            l.key,
+            SeriesKey::new("cpu")
+                .label("host", "web-1")
+                .label("dc", "fra")
+        );
         assert_eq!((l.ts, l.value), (1_700_000_000_000, 41.5));
     }
 

@@ -740,7 +740,8 @@ fn list_series_and_names() {
     let e = Engine::open(cfg(&dir)).unwrap();
     assert!(e.list_series().is_empty());
     for (n, h) in [("cpu", "a"), ("cpu", "b"), ("mem", "a")] {
-        e.append(&SeriesKey::new(n).label("host", h), 1, 1.0).unwrap();
+        e.append(&SeriesKey::new(n).label("host", h), 1, 1.0)
+            .unwrap();
     }
     assert_eq!(e.list_series().len(), 3);
     assert_eq!(e.metric_names(), vec!["cpu", "mem"]);
