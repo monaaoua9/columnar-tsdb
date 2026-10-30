@@ -87,8 +87,10 @@ mod tests {
         fs::write(d.join("a"), b"hello").unwrap();
         assert!(link_or_copy(&d.join("a"), &d.join("b")).unwrap());
         assert_eq!(fs::read(d.join("b")).unwrap(), b"hello");
-        // target exists -> link fails, copy overwrites
-        assert!(!link_or_copy(&d.join("a"), &d.join("b")).unwrap());
+        // target exists (and is a different file) -> link fails, copy overwrites
+        fs::write(d.join("x"), b"old").unwrap();
+        assert!(!link_or_copy(&d.join("a"), &d.join("x")).unwrap());
+        assert_eq!(fs::read(d.join("x")).unwrap(), b"hello");
         let e = link_or_copy(&d.join("gone"), &d.join("c")).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
         fs::remove_dir_all(d).unwrap();
