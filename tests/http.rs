@@ -84,7 +84,10 @@ fn write_then_query() {
 #[test]
 fn write_without_ts_uses_default() {
     let (e, srv, dir) = setup("dts");
-    assert_eq!(post(&srv, "/write?ts=777", "m v=1\nm2 v=2 5").0, 204);
+    assert_eq!(
+        post(&srv, "/write?ts=777", "m value=1\nm2 value=2 5").0,
+        204
+    );
     let m = columnar_tsdb::SeriesKey::new("m");
     assert_eq!(e.query_range(&m, 777, 778).unwrap().len(), 1);
     srv.shutdown();
@@ -95,7 +98,7 @@ fn write_without_ts_uses_default() {
 #[test]
 fn errors_use_the_error_envelope() {
     let (e, srv, dir) = setup("err");
-    let (c, b) = post(&srv, "/write", "good v=1 1\nbad line here\n");
+    let (c, b) = post(&srv, "/write", "good value=1 1\nbad line here\n");
     assert_eq!(c, 400);
     assert!(
         b.contains("\"code\":\"BAD_LINE\"") && b.contains("line 2"),
@@ -121,7 +124,7 @@ fn errors_use_the_error_envelope() {
 #[test]
 fn metrics_endpoint_and_oversize_body() {
     let (e, srv, dir) = setup("met");
-    post(&srv, "/write", "m v=1 1\n");
+    post(&srv, "/write", "m value=1 1\n");
     let (c, b) = get(&srv, "/metrics");
     assert_eq!(c, 200);
     assert!(b.contains("tsdb_points_appended_total 1\n"), "{b}");
@@ -184,7 +187,7 @@ fn bearer_token_guards_everything_but_health() {
         ("GET", "/query?query=x"),
         ("POST", "/write"),
     ] {
-        let (c, b) = with_auth(&srv, m, p, None, "m v=1 1\n");
+        let (c, b) = with_auth(&srv, m, p, None, "m value=1 1\n");
         assert_eq!(c, 401, "{m} {p}");
         assert!(b.contains("UNAUTHORIZED"), "{b}");
         for bad in [
@@ -196,7 +199,7 @@ fn bearer_token_guards_everything_but_health() {
             "Bearer ",
         ] {
             assert_eq!(
-                with_auth(&srv, m, p, Some(bad), "m v=1 1\n").0,
+                with_auth(&srv, m, p, Some(bad), "m value=1 1\n").0,
                 401,
                 "{bad:?}"
             );
@@ -206,7 +209,14 @@ fn bearer_token_guards_everything_but_health() {
     assert!(e.list_series().is_empty());
 
     assert_eq!(
-        with_auth(&srv, "POST", "/write", Some("Bearer s3cret"), "m v=1 1\n").0,
+        with_auth(
+            &srv,
+            "POST",
+            "/write",
+            Some("Bearer s3cret"),
+            "m value=1 1\n"
+        )
+        .0,
         204
     );
     assert_eq!(
