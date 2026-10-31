@@ -67,7 +67,7 @@ Criterion, 100,000 points, one run (its interval is the spread):
 cargo run --release --example query_bench
 ```
 
-100 series x 100,000 points (10 s apart, about 11 days), flushed to disk. One run, same laptop:
+100 series x 100,000 points (10 s apart, about 11 days), flushed to disk. One run on the busy laptop described below:
 
 | | time |
 |---|---:|
@@ -81,4 +81,4 @@ cargo run --release --example query_bench
 
 ## Limits of these numbers
 
-Single machine, a laptop whose clock speed moves with temperature, three runs per row. This file compares columnar-tsdb with no other engine.
+Single machine: an i5-8365U laptop with 8 GB RAM and Windows 11, usually with about six terminals open and a nearly full C: drive, so timings swing by 2-5x between runs. The query/regex/delete table above is a single run from such a session; read it as an order of magnitude. Otherwise: three runs per row, clock speed moves with temperature. This file compares columnar-tsdb with no other engine.

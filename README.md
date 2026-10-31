@@ -344,6 +344,12 @@ each, 256-point batches, alternating runs on the same machine, `WAL_SHARDS` env 
 Single-thread numbers on this laptop vary by +-30% run to run; the 8-thread gap is not
 noise.
 
+Where these numbers come from: a low-spec laptop (i5-8365U, 8 GB RAM, Windows 11) with
+about six terminals open at the same time and a C: drive that is almost full. Timings on
+it swing by 2-5x between runs, so treat every absolute number here as a rough order of
+magnitude, not a promise. Comparisons (old vs new, 1 vs 8 shards) were run in the same
+session; a faster or quieter machine will mostly just be faster.
+
 Backpressure: appends to a series block once it has more than
 `max_frozen_chunks` waiting for the sealer, and fail if the sealer is erroring.
 
