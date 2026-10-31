@@ -26,6 +26,38 @@ let sel = Selector::new("cpu_usage").eq("dc", "fra").ne("host", "web-9");
 let per_host = engine.aggregate_by(&sel, "host", i64::MIN, i64::MAX)?;
 ```
 
+## Try it in five minutes
+
+No library code needed; the `tsdb` binary wraps the same engine.
+
+```
+cargo build --release --bin tsdb          # target/release/tsdb
+
+# cpu.lp, four lines of line protocol:
+#   cpu_usage,host=web-1,dc=fra value=41.5 1700000000000
+#   cpu_usage,host=web-1,dc=fra value=43.0 1700000010000
+#   cpu_usage,host=web-2,dc=ams value=12.5 1700000000000
+#   cpu_usage,host=web-2,dc=ams value=15.0 1700000010000
+
+tsdb import ./data cpu.lp                  # imported 4 points
+tsdb series ./data                         # cpu_usage{dc=fra,host=web-1} ...
+
+# without --step a query is "the value at --end"; with --step it is a range
+tsdb query ./data 'cpu_usage{dc="fra"}' --start 1700000000000 --end 1700000020000
+tsdb query ./data 'avg by (dc) (cpu_usage)' --start 1700000000000 --end 1700000020000 --step 10s
+tsdb query ./data 'rate(cpu_usage{host="web-1"}[30s])' --start 1700000000000 --end 1700000020000
+
+# deleting needs an explicit range, on purpose
+tsdb delete ./data 'cpu_usage{host="web-2"}' --start 1700000000000 --end 1700000005000
+
+tsdb serve ./data 127.0.0.1:8086 --token s3cret    # then, from another terminal:
+curl -H 'Authorization: Bearer s3cret' 'http://127.0.0.1:8086/query?query=cpu_usage&start=now-1h&end=now&step=1m'
+```
+
+Timestamps are integers in whatever unit you write (the examples use milliseconds);
+`now` and `now-5m` only make sense when you write milliseconds. The field name in a line
+(`value=`) is ignored, so put the quantity in the metric name.
+
 ## Data flow
 
 ```mermaid
