@@ -211,9 +211,8 @@ impl Engine {
     // Removes the points of one series in [start, end) and returns how many went. Durable once it
     // returns: the delete is logged in the wal and replayed after a crash. Sealed chunks that
     // overlap the range are rewritten, so a big range costs a rewrite of those chunks.
-    // Concurrent queries see either all of the delete or none of it; a crash in the middle
-    // may leave it applied to only some chunks (the call never returned, so nothing was
-    // promised). Late points still waiting in the buffer count separately from the sealed
+    // Concurrent queries see either all of the delete or none of it. After a crash it is
+    // all or nothing too: once the wal record is durable, replay finishes it. Late points still waiting in the buffer count separately from the sealed
     // point they would have overwritten. The series stays in the catalog, empty.
     pub fn delete_range(&self, key: &SeriesKey, start: i64, end: i64) -> Result<u64> {
         match self.inner.find(key) {
@@ -222,7 +221,8 @@ impl Engine {
         }
     }
 
-    // delete_range over every series the selector matches
+    // delete_range over every series the selector matches. one wal record per series, so a
+    // crash in the middle can leave only some of them deleted; just run it again
     pub fn delete_select(&self, sel: &Selector, start: i64, end: i64) -> Result<u64> {
         let mut n = 0;
         for s in self.inner.resolve(sel) {

@@ -285,9 +285,12 @@ How it stays correct across crashes:
 - The mark also bumps the id counter on open, so ids handed out after a restart stay above
   every mark still in the log.
 
-Not atomic across chunks after a crash *during* the call (it never returned, so nothing was
-promised): some chunks may already be rewritten. Concurrent queries see all of the delete or
-none of it. Old binaries must not open a WAL that holds delete records.
+For one series a delete is all or nothing after a restart: before its WAL record is durable
+nothing is visible, afterwards replay finishes whatever the crash interrupted. What is *not*
+atomic is `delete_select` over several series: each series gets its own record, so a crash
+in the middle can leave some series deleted and others not (the call never returned, so
+nothing was promised; run it again). Concurrent queries see all of one series' delete or none
+of it. Old binaries must not open a WAL that holds delete records.
 
 ## Recovery
 
