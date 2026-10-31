@@ -1,11 +1,12 @@
-// influx-style line protocol, trimmed down: one f64 field per line.
+// influx-style line protocol, trimmed down: f64 fields only.
 //
 //   cpu_usage,host=web-1,dc=fra value=41.5 1700000000000
 //   cpu_usage,host=web-1 41.5
+//   cpu,host=web-1 usage=41.5,idle=58.5 1700000000000      -> series cpu_usage and cpu_idle
 //
-// the field part may be `value=41.5` (any field name is accepted and ignored, so two lines with
-// different field names but the same metric, labels and timestamp are the same point) or a bare
-// number. several fields on one line are an error.
+// a field named `value` (or a bare number) keeps the metric name; any other field name is
+// appended to it with `_`. numbers may carry influx's `i` / `u` suffix, `t` / `f` / `true` /
+// `false` become 1 / 0. string fields are an error.
 // timestamp is optional; the caller supplies a default (usually "now").
 // backslash escapes `\,` `\ ` `\=` in names / label values.
 
@@ -82,7 +83,10 @@ fn split_fields(line: &str, n: usize) -> Vec<&str> {
     out
 }
 
-pub fn parse_line(line: &str, default_ts: i64) -> Result<Line> {
+// one text line can carry several fields; each becomes its own point. a field called `value`
+// (or a bare number) keeps the metric name, any other field name is appended: `cpu usage=1`
+// is the series `cpu_usage`
+fn parse_fields(line: &str, default_ts: i64) -> Result<Vec<Line>> {
     let parts = split_fields(line.trim(), 3);
     if parts.len() < 2 {
         return Err(bad(line, "need series and value"));
@@ -92,7 +96,8 @@ pub fn parse_line(line: &str, default_ts: i64) -> Result<Line> {
     if head[0].is_empty() {
         return Err(bad(line, "empty metric name"));
     }
-    let mut key = SeriesKey::new(unescape(head[0]));
+    let metric = unescape(head[0]);
+    let mut labels = Vec::new();
     for kv in &head[1..] {
         let mut it = split_raw(kv, '=').into_iter();
         let (Some(k), Some(v), None) = (it.next(), it.next(), it.next()) else {
@@ -101,32 +106,63 @@ pub fn parse_line(line: &str, default_ts: i64) -> Result<Line> {
         if k.is_empty() {
             return Err(bad(line, "empty label key"));
         }
-        key = key.label(unescape(k), unescape(v));
+        labels.push((unescape(k), unescape(v)));
     }
 
-    // `usage=1,idle=2` is valid influx but we keep one field; taking the last one silently
-    // would drop data, so refuse
-    if parts[1].contains(',') {
-        return Err(bad(
-            line,
-            "one field per line (put the field name in the metric name)",
-        ));
-    }
-    let raw = parts[1].rsplit('=').next().unwrap_or("");
-    let value: f64 = raw
-        .parse()
-        .map_err(|_| bad(line, "value is not a number"))?;
-    if !value.is_finite() {
-        return Err(Error::BadValue(value));
-    }
-
-    let ts = match parts.get(2) {
+    let ts: i64 = match parts.get(2) {
         Some(t) => t
             .parse()
             .map_err(|_| bad(line, "timestamp is not an integer"))?,
         None => default_ts,
     };
-    Ok(Line { key, ts, value })
+
+    let mut out = Vec::new();
+    for f in split_raw(parts[1], ',') {
+        let (name, raw) = match f.rsplit_once('=') {
+            Some((n, r)) => (n, r),
+            None => ("value", f),
+        };
+        if name.is_empty() {
+            return Err(bad(line, "empty field name"));
+        }
+        let value = field_value(raw).ok_or_else(|| bad(line, "value is not a number"))?;
+        if !value.is_finite() {
+            return Err(Error::BadValue(value));
+        }
+        let mut key = if name == "value" {
+            SeriesKey::new(metric.clone())
+        } else {
+            SeriesKey::new(format!("{metric}_{}", unescape(name)))
+        };
+        for (k, v) in &labels {
+            key = key.label(k.clone(), v.clone());
+        }
+        out.push(Line { key, ts, value });
+    }
+    Ok(out)
+}
+
+// 41.5, 7i / 7u (influx integers), t / true / f / false
+fn field_value(raw: &str) -> Option<f64> {
+    match raw {
+        "t" | "T" | "true" | "True" | "TRUE" => return Some(1.0),
+        "f" | "F" | "false" | "False" | "FALSE" => return Some(0.0),
+        _ => {}
+    }
+    let num = raw
+        .strip_suffix('i')
+        .or_else(|| raw.strip_suffix('u'))
+        .unwrap_or(raw);
+    num.parse().ok()
+}
+
+// exactly one point per line; a line with several fields is an error here, use parse_lines
+pub fn parse_line(line: &str, default_ts: i64) -> Result<Line> {
+    let mut v = parse_fields(line, default_ts)?;
+    if v.len() != 1 {
+        return Err(bad(line, "several fields on one line, use parse_lines"));
+    }
+    Ok(v.pop().unwrap())
 }
 
 // blank lines and `#` comments are skipped. stops at the first bad line (nothing from
@@ -138,8 +174,8 @@ pub fn parse_lines(text: &str, default_ts: i64) -> Result<Vec<Line>> {
         if t.is_empty() || t.starts_with('#') {
             continue;
         }
-        match parse_line(t, default_ts) {
-            Ok(x) => out.push(x),
+        match parse_fields(t, default_ts) {
+            Ok(x) => out.extend(x),
             Err(Error::Corrupt(m)) => return Err(Error::corrupt(format!("line {}: {m}", n + 1))),
             Err(e) => return Err(e),
         }
@@ -237,6 +273,44 @@ mod tests {
             "m usage=1,idle=2 5",
         ] {
             assert!(parse_line(s, 0).is_err(), "should fail: {s:?}");
+        }
+    }
+
+    #[test]
+    fn several_fields_become_several_series() {
+        let v = parse_lines(
+            "cpu,host=a usage=41.5,idle=58.5 1000\nmem,host=a value=7 1000",
+            0,
+        )
+        .unwrap();
+        let names: Vec<_> = v.iter().map(|l| l.key.name()).collect();
+        assert_eq!(names, ["cpu_usage", "cpu_idle", "mem"]);
+        assert!(v.iter().all(|l| l.ts == 1000));
+        assert_eq!(v[1].value, 58.5);
+        // labels ride along on every field
+        assert_eq!(v[0].key, SeriesKey::new("cpu_usage").label("host", "a"));
+        // the one-point API refuses it instead of picking a field
+        assert!(parse_line("cpu usage=1,idle=2 5", 0).is_err());
+        // but a single named field is fine there, and is suffixed too
+        assert_eq!(
+            parse_line("cpu usage=1 5", 0).unwrap().key.name(),
+            "cpu_usage"
+        );
+    }
+
+    #[test]
+    fn influx_integer_and_bool_fields() {
+        let v = parse_lines("m a=7i,b=3u,c=true,d=f,e=-2.5 1", 0).unwrap();
+        let vals: Vec<f64> = v.iter().map(|l| l.value).collect();
+        assert_eq!(vals, [7.0, 3.0, 1.0, 0.0, -2.5]);
+        for bad in [
+            "m s=\"text\" 1",
+            "m a=1,=2 1",
+            "m a=1,b= 1",
+            "m a=1,,b=2 1",
+            "m 7ii 1",
+        ] {
+            assert!(parse_lines(bad, 0).is_err(), "{bad}");
         }
     }
 
