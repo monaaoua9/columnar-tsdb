@@ -55,8 +55,7 @@ curl -H 'Authorization: Bearer s3cret' 'http://127.0.0.1:8086/query?query=cpu_us
 ```
 
 Timestamps are integers in whatever unit you write (the examples use milliseconds);
-`now` and `now-5m` only make sense when you write milliseconds. The field name in a line
-(`value=`) is ignored, so put the quantity in the metric name.
+`now` and `now-5m` only make sense when you write milliseconds.
 
 ## Data flow
 
@@ -214,10 +213,15 @@ cpu_usage,host=web-1,dc=fra value=41.5 1700000000000
 cpu_usage,host=web-1 41.5            # no timestamp: caller's default (now over http)
 ```
 
-The field name is ignored, so the quantity goes in the metric name: `cpu_percent,host=a value=3`,
-not `cpu,host=a percent=3`. Two lines that differ only in field name (same metric, labels and
-timestamp) are the same point and the later one wins. Several fields on one line
-(`usage=1,idle=2`) are rejected.
+Fields: `value=41.5` (or a bare number) keeps the metric name; any other field name is appended
+with `_`, and several fields on one line become several series:
+
+```
+cpu,host=web-1 usage=41.5,idle=58.5 1700000000000     -> cpu_usage{host=web-1}, cpu_idle{host=web-1}
+```
+
+Numbers may carry influx's `i` / `u` suffix, `t` / `f` / `true` / `false` store 1 / 0, string
+fields are an error. (Before this, the field name was ignored and `usage=` wrote to `cpu`.)
 
 `lineproto::ingest(&engine, text, default_ts)` parses everything first (a bad line writes
 nothing, the error names the line) and appends one batch per series.
