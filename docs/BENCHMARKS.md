@@ -97,6 +97,26 @@ Ingests, drops the engine without a flush and reopens it (wal replay), checks th
 
 No point was lost in either size. Reopen time grows with the number of chunk files it has to open (about 11,600 in the big run), a bit faster than linearly: 5x the data took about 5-7x as long. Peak working set of the big run was 31 MB, but that was sampled by polling every few seconds from outside, so it is a floor, not a measurement. Wall times come from the busy laptop described below.
 
+## Soak
+
+```
+cargo run --release --example soak [seconds] [series]
+```
+
+A collector's life squeezed into minutes: 200 series, one point per series per tick, 10 s of data time per tick, one single-point `append_batch` per series (the worst case for the log), plus a reader running `avg by (host) (rate(sys{m="cpu"}[5m]))` every 200 ms. Every 20 s the engine is dropped without a flush and reopened, and the point count has to match what was written. Retention is off so the count is exact.
+
+One 240 s run on the busy laptop below: 31.6 M points (18.3 days of data time), 12 reopens, every count exact, 1,007 queries and none failed, no maintenance error.
+
+| | start | end |
+|---|---:|---:|
+| sealed chunks | 1,317 (at 20 s) | 3,773 |
+| reopen time | 0.59 s | 1.34 s |
+| WAL size | 96 MB | 72 MB |
+
+The WAL stays between about 66 and 97 MB for the whole run. Chunk count grows linearly with data time (about one chunk per series per day, so compaction is keeping up) and reopen time with it, about 0.35 ms per chunk, the same figure as in the load test. Up to 165 chunks were frozen and waiting for the sealer at the end of a 20 s stretch: the writer outruns the sealer here, and backpressure is what holds it. Working set, polled from outside every ~15 s, stayed between 15 and 49 MB, with no upward trend; the drops are the reopens. That polling is coarse, so read it as "no leak visible", not as a peak.
+
+This is 4 minutes, not days. It says nothing about a disk filling up or about retention under load.
+
 ## Limits of these numbers
 
 Single machine: an i5-8365U laptop with 8 GB RAM and Windows 11, usually with about six terminals open and a nearly full C: drive, so timings swing by 2-5x between runs. The query/regex/delete table above is a single run from such a session; read it as an order of magnitude. Otherwise: three runs per row, clock speed moves with temperature. This file compares columnar-tsdb with no other engine.
