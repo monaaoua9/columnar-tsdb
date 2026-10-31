@@ -182,6 +182,11 @@ cpu_usage,host=web-1,dc=fra value=41.5 1700000000000
 cpu_usage,host=web-1 41.5            # no timestamp: caller's default (now over http)
 ```
 
+The field name is ignored, so the quantity goes in the metric name: `cpu_percent,host=a value=3`,
+not `cpu,host=a percent=3`. Two lines that differ only in field name (same metric, labels and
+timestamp) are the same point and the later one wins. Several fields on one line
+(`usage=1,idle=2`) are rejected.
+
 `lineproto::ingest(&engine, text, default_ts)` parses everything first (a bad line writes
 nothing, the error names the line) and appends one batch per series.
 
