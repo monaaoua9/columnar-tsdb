@@ -50,9 +50,13 @@ const DIGIT: &[(char, char)] = &[('0', '9')];
 const WORD: &[(char, char)] = &[('a', 'z'), ('A', 'Z'), ('0', '9'), ('_', '_')];
 const SPACE: &[(char, char)] = &[(' ', ' '), ('\t', '\r')];
 
+// groups nest by recursion; without a cap a few thousand ( overflow the stack
+const MAX_DEPTH: usize = 100;
+
 struct P {
     c: Vec<char>,
     i: usize,
+    depth: usize,
 }
 
 impl P {
@@ -197,7 +201,12 @@ impl P {
                 if self.peek() == Some('?') && self.c.get(self.i + 1) == Some(&':') {
                     self.i += 2;
                 }
+                self.depth += 1;
+                if self.depth > MAX_DEPTH {
+                    return err("groups nested too deeply");
+                }
                 let n = self.alt()?;
+                self.depth -= 1;
                 if !self.eat(')') {
                     return err("missing )");
                 }
@@ -351,6 +360,7 @@ impl Regex {
         let mut p = P {
             c: pat.chars().collect(),
             i: 0,
+            depth: 0,
         };
         let ast = p.alt()?;
         if p.i < p.c.len() {
@@ -591,6 +601,14 @@ mod tests {
     }
 
     #[test]
+    fn nesting_is_capped() {
+        let deep = format!("{}a{}", "(".repeat(5_000), ")".repeat(5_000));
+        assert!(Regex::new(&deep).is_err());
+        let ok = format!("{}a{}", "(".repeat(50), ")".repeat(50));
+        assert!(Regex::new(&ok).unwrap().is_match("a"));
+    }
+
+    #[test]
     fn agrees_with_ast_reference() {
         let mut r = crate::testutil::Rng::new(77);
         let mut matched = 0;
@@ -599,6 +617,7 @@ mod tests {
             let mut p = P {
                 c: pat.chars().collect(),
                 i: 0,
+                depth: 0,
             };
             let ast = p.alt().unwrap();
             let re = Regex::new(&pat).unwrap();
