@@ -189,7 +189,11 @@ fn lex(src: &str) -> Result<Vec<(Tok, usize)>> {
                 }
                 let text: String = b[st..i].iter().collect();
                 if i < b.len() && b[i].is_ascii_alphabetic() {
-                    // duration like 90s or 1h30m
+                    // duration like 90s or 1h30m. `.5h` or `.count` would not advance below and
+                    // loop forever pushing tokens
+                    if !b[st].is_ascii_digit() {
+                        return err(format!("bad number {text:?} at {at}"));
+                    }
                     i = st;
                     let mut total = 0i64;
                     while i < b.len() && b[i].is_ascii_digit() {
@@ -252,6 +256,7 @@ struct Parser {
     toks: Vec<(Tok, usize)>,
     pos: usize,
     len: usize,
+    depth: usize,
 }
 
 pub fn parse(src: &str) -> Result<Expr> {
@@ -260,6 +265,7 @@ pub fn parse(src: &str) -> Result<Expr> {
         toks,
         pos: 0,
         len: src.chars().count(),
+        depth: 0,
     };
     let e = p.expr()?;
     if p.pos < p.toks.len() {
@@ -316,7 +322,24 @@ impl Parser {
         }
     }
 
+    // parens, call arguments and unary minus all come back through here or unary(); the cap
+    // keeps a hostile /query from overflowing the stack
+    fn enter(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > 100 {
+            return err("expression nested too deeply");
+        }
+        Ok(())
+    }
+
     fn expr(&mut self) -> Result<Expr> {
+        self.enter()?;
+        let e = self.expr_inner();
+        self.depth -= 1;
+        e
+    }
+
+    fn expr_inner(&mut self) -> Result<Expr> {
         let l = self.additive()?;
         let op = match self.peek() {
             Some(Tok::Gt) => BinOp::Gt,
@@ -361,7 +384,10 @@ impl Parser {
 
     fn unary(&mut self) -> Result<Expr> {
         if self.eat(&Tok::Minus) {
-            let e = self.unary()?;
+            self.enter()?;
+            let e = self.unary();
+            self.depth -= 1;
+            let e = e?;
             return Ok(Expr::Bin(BinOp::Sub, Box::new(Expr::Num(0.0)), Box::new(e)));
         }
         self.primary()
@@ -669,6 +695,19 @@ mod tests {
         }
         let m = parse("cpu{a=1}").unwrap_err().to_string();
         assert!(m.contains("at 6"), "{m}");
+    }
+
+    #[test]
+    fn hostile_input_terminates() {
+        // used to loop forever in the lexer (a lone `.` followed by letters)
+        for q in [".count(a", ".5h", "..m", "1..h"] {
+            assert!(parse(q).is_err(), "{q}");
+        }
+        // used to overflow the stack
+        let deep = format!("{}1{}", "(".repeat(5_000), ")".repeat(5_000));
+        assert!(parse(&deep).is_err());
+        assert!(parse(&format!("{}1", "-".repeat(5_000))).is_err());
+        assert!(parse(&format!("{}1{}", "(".repeat(50), ")".repeat(50))).is_ok());
     }
 
     #[test]
