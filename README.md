@@ -371,6 +371,12 @@ Backpressure: appends to a series block once it has more than
 - Query language: no subqueries, no joins on
   different label sets. `rate` extrapolates nothing, it is `increase / (last_ts - first_ts)`.
 - The HTTP server has no TLS (std has none). An optional bearer token (`ServerConfig`, `tsdb serve --token`) guards everything but `/health`, but it travels in clear text: keep the server on localhost or behind a TLS proxy.
+- Opening reads every chunk's `.meta` file, so open time grows with the number of chunks
+  (about 0.4 ms each on the dev laptop: 5 s for ~11,600 chunks, see docs/BENCHMARKS.md).
+  There is no manifest and no index inside a chunk: a range read decodes the chunk's
+  timestamp column (at most `max_points_per_chunk` = 16,384 values) and then only as many
+  values as it needs. A sparse in-chunk index would save little at that size and would
+  change the file format, so it is not there.
 - Snapshot holds the maintenance lock while it links files, and std mutexes aren't fair: under a
   writer that outruns the sealer it can wait a long time for its turn.
 
