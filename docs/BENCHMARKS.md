@@ -1,13 +1,27 @@
 # columnar-tsdb: benchmarks
 
-Measured 2026-10-29.
+Measured 2026-10-29 (ingest, writer scaling, codecs) and 2026-10-30/31 (queries, bigger data, soak).
 
 | | |
 |---|---|
 | CPU | Intel i5-8365U, 4 cores / 8 threads, 1.6 GHz base |
-| RAM / disk | 8 GB, SSD |
-| OS | Windows 11 |
+| RAM / disk | 8 GB, SSD, C: drive nearly full |
+| OS | Windows 11, real-time antivirus on |
+| Conditions | about six terminals open at the same time; timings swing 2-5x between runs |
 | Toolchain | Rust 1.99.1, `--release` |
+
+## How much to trust each section
+
+| section | what it is | runs | trust it for |
+|---|---|---|---|
+| Ingest and queries | ingest throughput, aggregates, one scan | 3 | order of magnitude; the two read rows are mostly the OS (see below) |
+| Writer scaling | 1 vs 8 WAL shards, 1-8 threads | 3 | the *comparison*: the gap is far bigger than the spread |
+| Codecs | criterion micro benchmarks | 1 (with its interval) | CPU-bound, the least noisy numbers here |
+| Queries, regex, delete | evaluator over 10 M points | 1 | order of magnitude only |
+| Bigger data | 20 M and 100 M points, reopen, size | 2 and 1 | the sizes (2.88 B/point) and "nothing lost"; times are rough |
+| Soak | 4 min of continuous ingest, reads and unclean reopens | 1 | "no loss, no failed query, no visible leak"; not for throughput |
+
+No section compares columnar-tsdb with another engine. Absolute numbers from a machine like this are rough; a quieter or faster one will mostly just be faster.
 
 ## Ingest and queries
 
@@ -67,7 +81,7 @@ Criterion, 100,000 points, one run (its interval is the spread):
 cargo run --release --example query_bench
 ```
 
-100 series x 100,000 points (10 s apart, about 11 days), flushed to disk. One run on the busy laptop described below:
+100 series x 100,000 points (10 s apart, about 11 days), flushed to disk. One run on the busy laptop described at the top:
 
 | | time |
 |---|---:|
@@ -95,7 +109,7 @@ Ingests, drops the engine without a flush and reopens it (wal replay), checks th
 | decode one whole series | 70 ms / 50 ms | 317 ms |
 | on disk | 57.6 MB (2.88 B/point) | 287.8 MB (2.88 B/point) |
 
-No point was lost in either size. Reopen time grows with the number of chunk files it has to open (about 11,600 in the big run), a bit faster than linearly: 5x the data took about 5-7x as long. Peak working set of the big run was 31 MB, but that was sampled by polling every few seconds from outside, so it is a floor, not a measurement. Wall times come from the busy laptop described below.
+No point was lost in either size. Reopen time grows with the number of chunk files it has to open (about 11,600 in the big run), a bit faster than linearly: 5x the data took about 5-7x as long. Peak working set of the big run was 31 MB, but that was sampled by polling every few seconds from outside, so it is a floor, not a measurement. Wall times come from the busy laptop described at the top.
 
 ## Soak
 
@@ -105,7 +119,7 @@ cargo run --release --example soak [seconds] [series]
 
 A collector's life squeezed into minutes: 200 series, one point per series per tick, 10 s of data time per tick, one single-point `append_batch` per series (the worst case for the log), plus a reader running `avg by (host) (rate(sys{m="cpu"}[5m]))` every 200 ms. Every 20 s the engine is dropped without a flush and reopened, and the point count has to match what was written. Retention is off so the count is exact.
 
-One 240 s run on the busy laptop below: 31.6 M points (18.3 days of data time), 12 reopens, every count exact, 1,007 queries and none failed, no maintenance error.
+One 240 s run on the busy laptop described at the top: 31.6 M points (18.3 days of data time), 12 reopens, every count exact, 1,007 queries and none failed, no maintenance error.
 
 | | start | end |
 |---|---:|---:|
@@ -115,8 +129,10 @@ One 240 s run on the busy laptop below: 31.6 M points (18.3 days of data time), 
 
 The WAL stays between about 66 and 97 MB for the whole run. Chunk count grows linearly with data time (about one chunk per series per day, so compaction is keeping up) and reopen time with it, about 0.35 ms per chunk, the same figure as in the load test. Up to 165 chunks were frozen and waiting for the sealer at the end of a 20 s stretch: the writer outruns the sealer here, and backpressure is what holds it. Working set, polled from outside every ~15 s, stayed between 15 and 49 MB, with no upward trend; the drops are the reopens. That polling is coarse, so read it as "no leak visible", not as a peak.
 
+The writer here does about 130,000 points/s (31.6 M points in 240 s, reopens and the reader included in that wall time) because every point is its own `append_batch`; the same engine takes millions per second in batches (see Codecs and Writer scaling). Do not compare those numbers.
+
 This is 4 minutes, not days. It says nothing about a disk filling up or about retention under load.
 
 ## Limits of these numbers
 
-Single machine: an i5-8365U laptop with 8 GB RAM and Windows 11, usually with about six terminals open and a nearly full C: drive, so timings swing by 2-5x between runs. The query/regex/delete table above is a single run from such a session; read it as an order of magnitude. Otherwise: three runs per row, clock speed moves with temperature. This file compares columnar-tsdb with no other engine.
+Single machine, a laptop whose clock speed moves with temperature, with other work running on it (see the table at the top). Sections with one run say so; the others have three. When comparing two builds, run them interleaved in one session and read best-of or the median, not a single run.
