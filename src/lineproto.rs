@@ -3,7 +3,9 @@
 //   cpu_usage,host=web-1,dc=fra value=41.5 1700000000000
 //   cpu_usage,host=web-1 41.5
 //
-// the field part may be `value=41.5` (any field name is accepted and ignored) or a bare number.
+// the field part may be `value=41.5` (any field name is accepted and ignored, so two lines with
+// different field names but the same metric, labels and timestamp are the same point) or a bare
+// number. several fields on one line are an error.
 // timestamp is optional; the caller supplies a default (usually "now").
 // backslash escapes `\,` `\ ` `\=` in names / label values.
 
@@ -102,6 +104,14 @@ pub fn parse_line(line: &str, default_ts: i64) -> Result<Line> {
         key = key.label(unescape(k), unescape(v));
     }
 
+    // `usage=1,idle=2` is valid influx but we keep one field; taking the last one silently
+    // would drop data, so refuse
+    if parts[1].contains(',') {
+        return Err(bad(
+            line,
+            "one field per line (put the field name in the metric name)",
+        ));
+    }
     let raw = parts[1].rsplit('=').next().unwrap_or("");
     let value: f64 = raw
         .parse()
@@ -224,6 +234,7 @@ mod tests {
             "m value=1 12.5",
             "m value=NaN",
             "m value=inf",
+            "m usage=1,idle=2 5",
         ] {
             assert!(parse_line(s, 0).is_err(), "should fail: {s:?}");
         }
