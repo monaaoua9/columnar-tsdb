@@ -79,6 +79,24 @@ cargo run --release --example query_bench
 | `count(cpu{host=~"h0[0-4]."})` | 69 ms |
 | delete one dc (25 series), 1 day: 216,000 points | 65 ms |
 
+## Bigger data
+
+```
+cargo run --release --example load_test [series] [points_per_series]
+```
+
+Ingests, drops the engine without a flush and reopens it (wal replay), checks that every point is still there, flushes, compacts, reopens again. Points are 10 s apart, one chunk per series per day.
+
+| | 50 x 400 k = 20 M points (two runs) | 100 x 1 M = 100 M points (one run) |
+|---|---:|---:|
+| ingest | 23.5 s / 20.3 s | 139 s |
+| reopen without flush | 1.28 s / 0.97 s | 7.3 s |
+| reopen after flush + compact | 1.07 s / 0.73 s | 5.0 s |
+| decode one whole series | 70 ms / 50 ms | 317 ms |
+| on disk | 57.6 MB (2.88 B/point) | 287.8 MB (2.88 B/point) |
+
+No point was lost in either size. Reopen time grows with the number of chunk files it has to open (about 11,600 in the big run), a bit faster than linearly: 5x the data took about 5-7x as long. Peak working set of the big run was 31 MB, but that was sampled by polling every few seconds from outside, so it is a floor, not a measurement. Wall times come from the busy laptop described below.
+
 ## Limits of these numbers
 
 Single machine: an i5-8365U laptop with 8 GB RAM and Windows 11, usually with about six terminals open and a nearly full C: drive, so timings swing by 2-5x between runs. The query/regex/delete table above is a single run from such a session; read it as an order of magnitude. Otherwise: three runs per row, clock speed moves with temperature. This file compares columnar-tsdb with no other engine.
